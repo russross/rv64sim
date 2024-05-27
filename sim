@@ -1,0 +1,1209 @@
+#!/usr/bin/env python3
+
+import sys
+import struct
+
+class CPU:
+    def __init__(self, pc_start: int, sp_start: int) -> None:
+        self.x = [0] * 32
+        self.pc = pc_start
+        self.x[2] = sp_start
+
+    def get(self, reg: int) -> int:
+        return self.x[reg]
+
+    def set(self, reg: int, value: int) -> None:
+        # zero register never changes
+        if reg != 0:
+            self.x[reg] = clip(value)
+
+    def set32(self, reg: int, value: int) -> None:
+        # zero register never changes
+        if reg != 0:
+            self.x[reg] = clip32(value)
+
+    def set_pc(self, value: int) -> None:
+        self.pc = clip(value)
+        if self.pc & 3 != 0:
+            print(f'Bus error: pc is {self.pc}', file=sys.stderr)
+            sys.exit(1)
+
+
+class AddressSpace:
+    def __init__(self, memory_start: int, memory_end: int, pc_start: int) -> None:
+        assert(memory_start >= 4096)
+        assert(memory_end > memory_start)
+        assert(memory_start & 0xfff == 0)
+        assert(memory_end & 0xfff == 0)
+        self.memory = bytearray(memory_end - memory_start)
+        self.memory_start = memory_start
+        self.memory_end = memory_end
+        self.pc_start = pc_start
+
+        # allocate a stack with a guard page
+        self.stack = bytearray(4096)
+        self.stack_start = memory_end + 4096
+        self.stack_end = self.stack_start + 4096
+
+    def lb(self, addr: int) -> int:
+        if      not (addr >= self.memory_start and addr < self.memory_end) and \
+                not (addr >= self.stack_start  and addr < self.stack_end):
+            print(f'Segmentation fault in lb: address is {addr}', file=sys.stderr)
+            sys.exit(1)
+        if addr < self.memory_end:
+            result = int.from_bytes(
+                    self.memory[addr - self.memory_start: addr+1 - self.memory_start],
+                    byteorder='little', signed=True)
+        else:
+            result = int.from_bytes(
+                    self.stack[addr - self.stack_start: addr+1 - self.stack_start],
+                    byteorder='little', signed=True)
+        return result
+
+    def lh(self, addr: int) -> int:
+        if (addr & 1) != 0:
+            print(f'Bus error in lh: address is {addr}', file=sys.stderr)
+            sys.exit(1)
+        if      not (addr >= self.memory_start and addr+1 < self.memory_end) and \
+                not (addr >= self.stack_start  and addr+1 < self.stack_end):
+            print(f'Segmentation fault in lh: address is {addr}', file=sys.stderr)
+            sys.exit(1)
+        if addr < self.memory_end:
+            result = int.from_bytes(
+                    self.memory[addr - self.memory_start: addr+2 - self.memory_start],
+                    byteorder='little', signed=True)
+        else:
+            result = int.from_bytes(
+                    self.stack[addr - self.stack_start: addr+2 - self.stack_start],
+                    byteorder='little', signed=True)
+        return result
+
+    def lw(self, addr: int) -> int:
+        if (addr & 3) != 0:
+            print(f'Bus error in lw: address is {addr}', file=sys.stderr)
+            sys.exit(1)
+        if      not (addr >= self.memory_start and addr+3 < self.memory_end) and \
+                not (addr >= self.stack_start  and addr+3 < self.stack_end):
+            print(f'Segmentation fault in lw: address is {addr}', file=sys.stderr)
+            sys.exit(1)
+        if addr < self.memory_end:
+            result = int.from_bytes(
+                    self.memory[addr - self.memory_start: addr+4 - self.memory_start],
+                    byteorder='little', signed=True)
+        else:
+            result = int.from_bytes(
+                    self.stack[addr - self.stack_start: addr+4 - self.stack_start],
+                    byteorder='little', signed=True)
+        return result
+
+    def ld(self, addr: int) -> int:
+        if (addr & 7) != 0:
+            print(f'Bus error in ld: address is {addr}', file=sys.stderr)
+            sys.exit(1)
+        if      not (addr >= self.memory_start and addr+7 < self.memory_end) and \
+                not (addr >= self.stack_start  and addr+7 < self.stack_end):
+            print(f'Segmentation fault in ld: address is {addr}', file=sys.stderr)
+            sys.exit(1)
+        if addr < self.memory_end:
+            result = int.from_bytes(
+                    self.memory[addr - self.memory_start: addr+8 - self.memory_start],
+                    byteorder='little', signed=True)
+        else:
+            result = int.from_bytes(
+                    self.stack[addr - self.stack_start: addr+8 - self.stack_start],
+                    byteorder='little', signed=True)
+        return result
+
+    def lbu(self, addr: int) -> int:
+        if      not (addr >= self.memory_start and addr < self.memory_end) and \
+                not (addr >= self.stack_start  and addr < self.stack_end):
+            print(f'Segmentation fault in lbu: address is {addr}', file=sys.stderr)
+            sys.exit(1)
+        if addr < self.memory_end:
+            result = int.from_bytes(
+                    self.memory[addr - self.memory_start: addr+1 - self.memory_start],
+                    byteorder='little', signed=False)
+        else:
+            result = int.from_bytes(
+                    self.stack[addr - self.stack_start: addr+1 - self.stack_start],
+                    byteorder='little', signed=False)
+        return result
+
+    def lhu(self, addr: int) -> int:
+        if (addr & 1) != 0:
+            print(f'Bus error in lhu: address is {addr}', file=sys.stderr)
+            sys.exit(1)
+        if      not (addr >= self.memory_start and addr+1 < self.memory_end) and \
+                not (addr >= self.stack_start  and addr+1 < self.stack_end):
+            print(f'Segmentation fault in lhu: address is {addr}', file=sys.stderr)
+            sys.exit(1)
+        if addr < self.memory_end:
+            result = int.from_bytes(
+                    self.memory[addr - self.memory_start: addr+2 - self.memory_start],
+                    byteorder='little', signed=False)
+        else:
+            result = int.from_bytes(
+                    self.stack[addr - self.stack_start: addr+2 - self.stack_start],
+                    byteorder='little', signed=False)
+        return result
+
+    def lwu(self, addr: int) -> int:
+        if (addr & 3) != 0:
+            print(f'Bus error in lwu: address is {addr}', file=sys.stderr)
+            sys.exit(1)
+        if      not (addr >= self.memory_start and addr+3 < self.memory_end) and \
+                not (addr >= self.stack_start  and addr+3 < self.stack_end):
+            print(f'Segmentation fault in lwu: address is {addr}', file=sys.stderr)
+            sys.exit(1)
+        if addr < self.memory_end:
+            result = int.from_bytes(
+                self.memory[addr - self.memory_start: addr+4 - self.memory_start],
+                byteorder='little', signed=False)
+        else:
+            result = int.from_bytes(
+                self.stack[addr - self.stack_start: addr+4 - self.stack_start],
+                byteorder='little', signed=False)
+        return result
+
+    def sb(self, addr: int, value: int) -> None:
+        if      not (addr >= self.memory_start and addr < self.memory_end) and \
+                not (addr >= self.stack_start  and addr < self.stack_end):
+            print(f'Segmentation fault in sb: address is {addr}', file=sys.stderr)
+            sys.exit(1)
+        raw = (value & 0xff).to_bytes(1, byteorder='little', signed=False)
+        if addr < self.memory_end:
+            for (i, b) in enumerate(raw):
+                self.memory[addr+i - self.memory_start] = b
+        else:
+            for (i, b) in enumerate(raw):
+                self.stack[addr+i - self.stack_start] = b
+
+    def sh(self, addr: int, value: int) -> None:
+        if      not (addr >= self.memory_start and addr+1 < self.memory_end) and \
+                not (addr >= self.stack_start  and addr+1 < self.stack_end):
+            print(f'Segmentation fault in sh: address is {addr}', file=sys.stderr)
+            sys.exit(1)
+        raw = (value & 0xffff).to_bytes(2, byteorder='little', signed=False)
+        if addr < self.memory_end:
+            for (i, b) in enumerate(raw):
+                self.memory[addr+i - self.memory_start] = b
+        else:
+            for (i, b) in enumerate(raw):
+                self.stack[addr+i - self.stack_start] = b
+
+    def sw(self, addr: int, value: int) -> None:
+        if      not (addr >= self.memory_start and addr+3 < self.memory_end) and \
+                not (addr >= self.stack_start  and addr+3 < self.stack_end):
+            print(f'Segmentation fault in sw: address is {addr}', file=sys.stderr)
+            sys.exit(1)
+        raw = (value & 0xffffffff).to_bytes(4, byteorder='little', signed=False)
+        if addr < self.memory_end:
+            for (i, b) in enumerate(raw):
+                self.memory[addr+i - self.memory_start] = b
+        else:
+            for (i, b) in enumerate(raw):
+                self.stack[addr+i - self.stack_start] = b
+
+    def sd(self, addr: int, value: int) -> None:
+        if      not (addr >= self.memory_start and addr+7 < self.memory_end) and \
+                not (addr >= self.stack_start  and addr+7 < self.stack_end):
+            print(f'Segmentation fault in sd: address is {addr}', file=sys.stderr)
+            sys.exit(1)
+        raw = value.to_bytes(8, byteorder='little', signed=True)
+        if addr < self.memory_end:
+            for (i, b) in enumerate(raw):
+                self.memory[addr+i - self.memory_start] = b
+        else:
+            for (i, b) in enumerate(raw):
+                self.stack[addr+i - self.stack_start] = b
+
+# misc helpers
+def print32(s: str) -> None:
+    print(f'{s:<32}', end='')
+
+def unsigned(i: int) -> int:
+    return i&0xffffffffffffffff
+
+maxint = (1<<63) - 1
+def clip(i: int) -> int:
+    if -maxint - 1 <= i <= maxint:
+        return i
+    return (i + (maxint+1)) % (2 * (maxint+1)) - maxint - 1
+
+maxint32 = (1<<31) - 1
+def clip32(i: int) -> int:
+    if -maxint32 - 1 <= i <= maxint32:
+        return i
+    return (i + (maxint32+1)) % (2 * (maxint32+1)) - maxint32 - 1
+
+def load_elf(filename: str) -> AddressSpace:
+    with open(filename, mode='rb') as fp:
+        raw = fp.read()
+
+        # unpack the elf header
+        (
+            e_ident_mag,
+            e_ident_class, e_ident_data, e_ident_version, e_ident_osabi,
+            e_ident_abiversion,
+
+            e_type, e_machine, e_version, e_entry,
+
+            e_phoff, e_shoff,
+
+            e_flags, e_ehsize, e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx
+        ) = struct.unpack('<4s5B7x'+'2HIQ'+'2Q'+'I6H', raw[:0x40])
+        
+        # sanity check everything
+        assert(e_ident_mag == b'\x7fELF')       # magic number
+        assert(e_ident_class == 2)              # 64 bit
+        assert(e_ident_data == 1)               # little endian
+        assert(e_ident_version == 1)            # version 1 format
+        assert(e_ident_osabi == 0)              # System V ABI
+
+        assert(e_type == 2)                     # executable
+        assert(e_machine == 0xf3)               # RISC-V
+        assert(e_version == 1)                  # ELF version 1
+
+        assert(e_phoff == 0x40)                 # start of program headers
+        assert(e_ehsize == 0x40)                # size of elf header
+        assert(e_phentsize == 0x38)             # size of program header entry
+        assert(e_phnum >= 1)                    # number of program header entries
+
+        # first pass--find how big the VM footprint is
+        memory_start, memory_end = 0, 0
+        for i in range(e_phnum):
+            # unpack the program header
+            #print('unpacking program header')
+            start = e_phoff + e_phentsize*i
+            (
+                p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align
+            ) = struct.unpack('<2I6Q', raw[start:start+e_phentsize])
+
+            if p_type != 1:
+                continue
+            assert(p_vaddr >= 0)
+            #print(f'found section at {p_vaddr} + {p_memsz}')
+            if memory_end == 0 or p_vaddr < memory_start:
+                memory_start = p_vaddr
+            if p_vaddr + p_memsz > memory_end:
+                memory_end = p_vaddr + p_memsz
+        #print(f'memory_start: {memory_start}, memory_end: {memory_end}')
+
+        # round to page boundaries at both ends
+        memory_start &= ~4095
+        memory_end = (memory_end + 4095) & ~4095
+
+        # allocate a page of stack
+        #print(f'allocated {(memory_end - memory_start) // 1024}k address space from 0x{memory_start:x} to 0x{memory_end:x} (not including 4k stack)')
+
+        # allocate address space
+        aspace = AddressSpace(memory_start, memory_end, e_entry)
+
+        # second pass--load the segments
+        for i in range(e_phnum):
+            # unpack the program header
+            #print(f'unpacking program header {i+1}')
+            start = e_phoff + e_phentsize*i
+            (
+                p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align
+            ) = struct.unpack('<2I6Q', raw[start:start+e_phentsize])
+
+            if p_type != 1:
+                #print('    skipping non-loadable segment')
+                continue
+            print(f'    loading segment from offset 0x{p_offset:x} with size 0x{p_filesz:x}')
+            print(f'    into virtual address 0x{p_vaddr:x} with size 0x{p_memsz:x}')
+
+            for i in range(p_filesz):
+                aspace.sb(p_vaddr + i, raw[p_offset + i])
+
+        return aspace
+
+# instruction decoders
+def get_funct3(inst: int) -> int:
+    return (inst>>12) & 0x07
+
+def get_rd(inst: int) -> int:
+    return (inst>>7) & 0x1f
+
+def get_rs1(inst: int) -> int:
+    return (inst>>15) & 0x1f
+
+def get_rs2(inst: int) -> int:
+    return (inst>>20) & 0x1f
+
+def get_imm_i(inst: int) -> int:
+    return clip32(inst >> 20)
+
+def get_imm_s(inst: int) -> int:
+    imm =  (inst >> 20) & 0x00000fe0
+    imm |= (inst >> 7)  & 0x0000001f
+    return clip32(imm)
+
+def get_imm_b(inst: int) -> int:
+    imm =  (inst >> 20) & 0xfffff000
+    imm |= (inst << 4)  & 0x00000800
+    imm |= (inst >> 20) & 0x000007e0
+    imm |= (inst >> 7)  & 0x0000001e
+    return clip32(imm)
+
+def get_imm_u(inst: int) -> int:
+    return clip32(inst & 0xfffff000)
+
+def get_imm_j(inst: int) -> int:
+    imm =  (inst >> 11) & 0xfff00000
+    imm |=  inst        & 0x000ff000
+    imm |= (inst >> 9)  & 0x00000800
+    imm |= (inst >> 20) & 0x000007e0
+    imm |= (inst >> 20) & 0x0000001e
+    return clip32(imm)
+
+def get_funct7(inst: int) -> int:
+    return clip32(inst >> 25)
+
+r = [
+    'zero', 'ra', 'sp', 'gp', 'tp', 't0', 't1', 't2',
+    's0', 's1', 'a0', 'a1', 'a2', 'a3', 'a4', 'a5',
+    'a6', 'a7', 's2', 's3', 's4', 's5', 's6', 's7',
+    's8', 's9', 's10', 's11', 't3', 't4', 't5', 't6',
+    'zero', 'ra', 'sp', 'gp', 'tp', 't0', 't1', 't2',
+    's0', 's1', 'a0', 'a1', 'a2', 'a3', 'a4', 'a5',
+    'a6', 'a7', 's2', 's3', 's4', 's5', 's6', 's7',
+    's8', 's9', 's10', 's11', 't3', 't4', 't5', 't6',
+]
+
+def execute(mem: AddressSpace, cpu: CPU, inst: int) -> bool:
+    okay = False
+
+    # print the address and the raw instruction bits
+    print(f'{cpu.pc:6}: {inst&0xffffffff:08x}    ', end='')
+
+    # divide the instructions up according the main instruction opcode
+    # then call a specialized function for each opcode to do the rest
+    opcode = inst & 0x7f
+    match opcode:
+        # lui
+        case 0x37:
+            okay = execute_lui(cpu, get_rd(inst), get_imm_u(inst))
+            cpu.set_pc(cpu.pc + 4)
+
+        # auipc
+        case 0x17:
+            okay = execute_auipc(cpu, get_rd(inst), get_imm_u(inst))
+            cpu.set_pc(cpu.pc + 4)
+
+        # jal
+        case 0x6f:
+            # execute_jal updates the PC
+            okay = execute_jal(cpu, get_rd(inst), get_imm_j(inst))
+
+        # jalr
+        case 0x67:
+            # execute_jalr updates the PC
+            okay = execute_jalr(cpu, get_funct3(inst), get_rd(inst), get_rs1(inst), get_imm_i(inst))
+
+        # beq, bne, blt, bge, bltu, bgeu
+        case 0x63:
+            # execute_branches updates the PC
+            okay = execute_branches(cpu, get_funct3(inst), get_rs1(inst), get_rs2(inst), get_imm_b(inst))
+
+        # lb, lh, lw, ld, lbu, lhu, lwu
+        case 0x03:
+            okay = execute_load(mem, cpu, get_funct3(inst), get_rd(inst), get_rs1(inst), get_imm_i(inst))
+            cpu.set_pc(cpu.pc + 4)
+
+        # sb, sh, sw, sd
+        case 0x23:
+            okay = execute_store(mem, cpu, get_funct3(inst), get_rs1(inst), get_rs2(inst), get_imm_s(inst))
+            cpu.set_pc(cpu.pc + 4)
+
+        # addi, slti, sltiu, xori, ori, andi, slli, srli, srai
+        case 0x13:
+            okay = execute_alu_imm(cpu, get_funct3(inst), get_rd(inst), get_rs1(inst), get_imm_i(inst))
+            cpu.set_pc(cpu.pc + 4)
+
+        # addiw, slliw, srliw, sraiw
+        case 0x1b:
+            okay = execute_alu_imm_w(cpu, get_funct3(inst), get_rd(inst), get_rs1(inst), get_imm_i(inst))
+            cpu.set_pc(cpu.pc + 4)
+
+        # add, sub, sll, slt, sltu, xor, srl, sra, or, and
+        # mul, mulh, mulhsu, mulhu, div, divu, rem, remu
+        case 0x33:
+            okay = execute_alu(cpu, get_funct3(inst), get_rd(inst), get_rs1(inst), get_rs2(inst), get_funct7(inst))
+            cpu.set_pc(cpu.pc + 4)
+
+        # fence
+        case 0x0f:
+            # ignore this instruction
+            print32('fence     *')
+            print('--')
+            cpu.set_pc(cpu.pc + 4)
+
+        # ecall, ebreak
+        case 0x73:
+            if inst == 0x00000073:
+                okay = execute_ecall(mem, cpu)
+                cpu.set_pc(cpu.pc + 4)
+
+                # if ecall was an exit syscall we quit gracefully
+                return okay
+            elif inst == 0x00100073:
+                # handle ebreak here--print the instruction and exit
+                print('ebreak')
+                return False
+
+    if not okay:
+        print('unknown instruction')
+
+    return okay
+
+def execute_lui(cpu: CPU, rd: int, imm: int) -> bool:
+    print32(f'lui     {r[rd]}, {imm}')
+
+    cpu.set(rd, imm)
+
+    print(f'{r[rd]} <- {cpu.get(rd)}')
+
+    return True
+
+def execute_auipc(cpu: CPU, rd: int, imm: int) -> bool:
+    print32(f'auipc   {r[rd]}, {imm}')
+
+    cpu.set(rd, cpu.pc + imm)
+
+    print(f'{r[rd]} <- {cpu.get(rd)}')
+
+    return True
+
+def execute_jal(cpu: CPU, rd: int, imm: int) -> bool:
+    if rd == 0:
+        print32(f'j       {imm}')
+    elif rd == 1:
+        print32(f'jal     {imm}')
+    else:
+        print32(f'jal     {r[rd]}, {imm}')
+
+    cpu.set(rd, cpu.pc + 4)
+    cpu.set_pc(cpu.pc + imm)
+
+    if rd != 0:
+        print(f'{r[rd]} <- {cpu.get(rd)}, ', end='')
+    print(f'pc <- {cpu.pc}')
+
+    return True
+
+def execute_jalr(cpu: CPU, funct3: int, rd: int, rs1: int, imm: int) -> bool:
+    if funct3 != 0:
+        return False
+
+    if rd == 0 and rs1 == 1 and imm == 0:
+        print32('ret')
+    elif rd == 0 and imm == 0:
+        print32(f'jr      {r[rs1]}')
+    elif rd == 1 and imm == 0:
+        print32(f'jalr    {r[rs1]}')
+    elif imm == 0:
+        print32(f'jalr    {r[rd]}, ({r[rs1]})')
+    else:
+        print32(f'jalr    {r[rd]}, {imm}({r[rs1]})')
+
+    # rd and rs1 could be the same, so capture rs1 before setting rd
+    rs1_val = cpu.get(rs1)
+    cpu.set(rd, cpu.pc + 4)
+    cpu.set_pc((rs1_val + imm) & ~1)
+
+    if rd != 0:
+        print(f'{r[rd]} <- {cpu.get(rd)}', end='')
+    print(f'pc <- {cpu.pc}')
+
+    return True
+
+def execute_branches(cpu: CPU, funct3: int, rs1: int, rs2: int, imm: int) -> bool:
+    taken = False
+
+    match funct3:
+        case 0:
+            if rs2 == 0:
+                print32(f'beqz    {r[rs1]}, {imm}')
+            else:
+                print32(f'beq     {r[rs1]}, {r[rs2]}, {imm}')
+
+            taken = cpu.get(rs1) == cpu.get(rs2)
+
+        case 1:
+            if rs2 == 0:
+                print32(f'bnez    {r[rs1]}, {imm}')
+            else:
+                print32(f'bne     {r[rs1]}, {r[rs2]}, {imm}')
+
+            taken = cpu.get(rs1) != cpu.get(rs2)
+
+        case 4:
+            if rs2 == 0:
+                print32(f'bltz    {r[rs1]}, {imm}')
+            elif rs1 == 0:
+                print32(f'bgtz    {r[rs2]}, {imm}')
+            else:
+                print32(f'blt     {r[rs1]}, {r[rs2]}, {imm}')
+
+            taken = cpu.get(rs1) < cpu.get(rs2)
+
+        case 5:
+            if rs1 == 0:
+                print32(f'blez    {r[rs2]}, {imm}')
+            elif rs2 == 0:
+                print32(f'bgez    {r[rs1]}, {imm}')
+            else:
+                print32(f'bge     {r[rs1]}, {r[rs2]}, {imm}')
+
+            taken = cpu.get(rs1) >= cpu.get(rs2)
+
+        case 6:
+            print32(f'bltu    {r[rs1]}, {r[rs2]}, {imm}')
+
+            taken = unsigned(cpu.get(rs1)) < unsigned(cpu.get(rs2))
+
+        case 7:
+            print32(f'bgeu    {r[rs1]}, {r[rs2]}, {imm}')
+
+            taken = unsigned(cpu.get(rs1)) >= unsigned(cpu.get(rs2))
+
+        case _:
+            return False
+
+    if taken:
+        cpu.set_pc(cpu.pc + imm)
+        print(f'pc <- {cpu.pc}')
+    else:
+        cpu.set_pc(cpu.pc + 4)
+        print('--')
+
+    return True
+
+def execute_load(mem: AddressSpace, cpu: CPU, funct3: int, rd: int, rs1: int, imm: int) -> bool:
+    match funct3:
+        case 0:
+            if imm == 0:
+                print32(f'lb      {r[rd]}, ({r[rs1]})')
+            else:
+                print32(f'lb      {r[rd]}, {imm}({r[rs1]})')
+
+            address = cpu.get(rs1) + imm
+            cpu.set(rd, mem.lb(address))
+
+            print(f'{r[rd]} <- {cpu.get(rd)} ({address})')
+            return True
+
+        case 1:
+            if imm == 0:
+                print32(f'lh      {r[rd]}, ({r[rs1]})')
+            else:
+                print32(f'lh      {r[rd]}, {imm}({r[rs1]})')
+
+            address = cpu.get(rs1) + imm
+            cpu.set(rd, mem.lh(address))
+
+            print(f'{r[rd]} <- {cpu.get(rd)} ({address})')
+            return True
+
+        case 2:
+            if imm == 0:
+                print32(f'lw      {r[rd]}, ({r[rs1]})')
+            else:
+                print32(f'lw      {r[rd]}, {imm}({r[rs1]})')
+
+            address = cpu.get(rs1) + imm
+            cpu.set(rd, mem.lw(address))
+
+            print(f'{r[rd]} <- {cpu.get(rd)} ({address})')
+            return True
+
+        case 3:
+            if imm == 0:
+                print32(f'ld      {r[rd]}, ({r[rs1]})')
+            else:
+                print32(f'ld      {r[rd]}, {imm}({r[rs1]})')
+
+            address = cpu.get(rs1) + imm
+            cpu.set(rd, mem.ld(address))
+
+            print(f'{r[rd]} <- {cpu.get(rd)} ({address})')
+            return True
+
+        case 4:
+            if imm == 0:
+                print32(f'lbu     {r[rd]}, ({r[rs1]})')
+            else:
+                print32(f'lbu     {r[rd]}, {imm}({r[rs1]})')
+
+            address = cpu.get(rs1) + imm
+            cpu.set(rd, mem.lbu(address))
+
+            print(f'{r[rd]} <- {cpu.get(rd)} ({address})')
+            return True
+
+        case 5:
+            if imm == 0:
+                print32(f'lhu     {r[rd]}, ({r[rs1]})')
+            else:
+                print32(f'lhu     {r[rd]}, {imm}({r[rs1]})')
+
+            address = cpu.get(rs1) + imm
+            cpu.set(rd, mem.lhu(address))
+
+            print(f'{r[rd]} <- {cpu.get(rd)} ({address})')
+            return True
+
+        case 6:
+            if imm == 0:
+                print32(f'lwu     {r[rd]}, ({r[rs1]})')
+            else:
+                print32(f'lwu     {r[rd]}, {imm}({r[rs1]})')
+
+            address = cpu.get(rs1) + imm
+            cpu.set(rd, mem.lwu(address))
+
+            print(f'{r[rd]} <- {cpu.get(rd)} ({address})')
+            return True
+
+    return False
+
+def execute_store(mem: AddressSpace, cpu: CPU, funct3: int, rs1: int, rs2: int, imm: int) -> bool:
+    match funct3:
+        case 0:
+            if imm == 0:
+                print32(f'sb      {r[rs2]}, ({r[rs1]})')
+            else:
+                print32(f'sb      {r[rs2]}, {imm}({r[rs1]})')
+
+            address = cpu.get(rs1) + imm
+            val8 = cpu.get(rs2) & 0xff
+            mem.sb(address, val8)
+
+            print(f'({address}) <- {val8}')
+            return True
+
+        case 1:
+            if imm == 0:
+                print32(f'sh      {r[rs2]}, ({r[rs1]})')
+            else:
+                print32(f'sh      {r[rs2]}, {imm}({r[rs1]})')
+
+            address = cpu.get(rs1) + imm
+            val16 = cpu.get(rs2) & 0xffff
+            mem.sh(address, val16)
+
+            print(f'({address}) <- {val16}')
+            return True
+
+        case 2:
+            if imm == 0:
+                print32(f'sw      {r[rs2]}, ({r[rs1]})')
+            else:
+                print32(f'sw      {r[rs2]}, {imm}({r[rs1]})')
+
+            address = cpu.get(rs1) + imm
+            val32 = cpu.get(rs2) & 0xffffffff
+            mem.sw(address, val32)
+
+            print(f'({address}) <- {val32}')
+            return True
+
+        case 3:
+            if imm == 0:
+                print32(f'sd      {r[rs2]}, ({r[rs1]})')
+            else:
+                print32(f'sd      {r[rs2]}, {imm}({r[rs1]})')
+
+            address = cpu.get(rs1) + imm
+            mem.sd(address, cpu.get(rs2))
+
+            print(f'({address}) <- {cpu.get(rs2)}')
+            return True
+
+    return False
+
+def execute_alu_imm(cpu: CPU, funct3: int, rd: int, rs1: int, imm: int) -> bool:
+    shamt = imm & 0x3f
+    imm_high = imm>>6
+
+    match funct3:
+        case 0:
+            if rd == 0 and rs1 == 0 and imm == 0:
+                print('nop')
+            elif rs1 == 0:
+                print32(f'li      {r[rd]}, {imm}')
+            elif imm == 0:
+                print32(f'mv      {r[rd]}, {r[rs1]}')
+            else:
+                print32(f'addi    {r[rd]}, {r[rs1]}, {imm}')
+
+            cpu.set(rd, cpu.get(rs1) + imm)
+
+            if rd != 0:
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 2:
+            print32(f'slti    {r[rd]}, {r[rs1]}, {imm}')
+
+            cpu.set(rd, 1 if cpu.get(rs1) < imm else 0)
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 3:
+            if imm == 1:
+                print32(f'seqz    {r[rd]}, {r[rs1]}')
+            else:
+                print32(f'sltiu   {r[rd]}, {r[rs1]}, {imm}')
+
+            cpu.set(rd, 1 if unsigned(cpu.get(rs1)) < unsigned(imm) else 0)
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 4:
+            if imm == -1:
+                print32(f'not     {r[rd]}, {r[rs1]}')
+            else:
+                print32(f'xori    {r[rd]}, {r[rs1]}, {imm}')
+
+            cpu.set(rd, cpu.get(rs1) ^ unsigned(imm))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 6:
+            print32(f'ori     {r[rd]}, {r[rs1]}, {imm}')
+
+            cpu.set(rd, cpu.get(rs1) | imm)
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 7:
+            print32(f'andi    {r[rd]}, {r[rs1]}, {imm}')
+
+            cpu.set(rd, cpu.get(rs1) & imm)
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 1:
+            if imm_high != 0x00:
+                return False
+
+            print32(f'slli    {r[rd]}, {r[rs1]}, {shamt}')
+
+            cpu.set(rd, cpu.get(rs1) << shamt)
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 5:
+            if imm_high == 0x00:
+                print32(f'srli    {r[rd]}, {r[rs1]}, {shamt}')
+
+                cpu.set(rd, unsigned(cpu.get(rs1)) >> shamt)
+
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+                return True
+            elif imm_high == 0x10:
+                print32(f'srai    {r[rd]}, {r[rs1]}, {shamt}')
+
+                cpu.set(rd, cpu.get(rs1) >> shamt)
+
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+                return True
+            return False
+            
+    return False
+
+def execute_alu_imm_w(cpu: CPU, funct3: int, rd: int, rs1: int, imm: int) -> bool:
+    shamt = imm & 0x1f
+    imm_high = imm>>5
+
+    match funct3:
+        case 0:
+            print32(f'addiw   {r[rd]}, {r[rs1]}, {imm}')
+
+            cpu.set32(rd, cpu.get(rs1) + imm)
+
+            if rd != 0:
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 1:
+            if imm_high != 0x00:
+                return False
+
+            print32(f'slliw   {r[rd]}, {r[rs1]}, {shamt}')
+
+            cpu.set32(rd, cpu.get(rs1) << shamt)
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 5:
+            if imm_high == 0x00:
+                print32(f'srliw   {r[rd]}, {r[rs1]}, {shamt}')
+
+                cpu.set32(rd, unsigned(cpu.get(rs1)) >> shamt)
+
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+                return True
+            elif imm_high == 0x20:
+                print32(f'sraiw   {r[rd]}, {r[rs1]}, {shamt}')
+
+                cpu.set32(rd, cpu.get(rs1) >> shamt)
+
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+                return True
+            return False
+
+    return False
+
+def execute_alu(cpu: CPU, funct3: int, rd: int, rs1: int, rs2: int, funct7: int) -> bool:
+    combined = (funct7 << 8) | funct3
+
+    match combined:
+        case 0x0000:
+            print32(f'add     {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, cpu.get(rs1) + cpu.get(rs2))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x2000:
+            if rs1 == 0:
+                print32(f'neg     {r[rd]}, {r[rs2]}')
+            else:
+                print32(f'sub     {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, cpu.get(rs1) - cpu.get(rs2))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0001:
+            print32(f'sll     {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, cpu.get(rs1) << (cpu.get(rs2) & 0x3f))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0002:
+            if rs2 == 0:
+                print32(f'sltz    {r[rd]}, {r[rs1]}')
+            elif rs1 == 0:
+                print32(f'sgtz    {r[rd]}, {r[rs2]}')
+            else:
+                print32(f'slt     {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, 1 if cpu.get(rs1) < cpu.get(rs2) else 0)
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0003:
+            if rs1 == 0:
+                print32(f'snez    {r[rd]}, {r[rs2]}')
+            else:
+                print32(f'sltu    {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, 1 if unsigned(cpu.get(rs1)) < unsigned(cpu.get(rs2)) else 0)
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0004:
+            print32(f'xor     {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, cpu.get(rs1) ^ cpu.get(rs2))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0005:
+            print32(f'srl     {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, unsigned(cpu.get(rs1)) >> (cpu.get(rs2) & 0x3f))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x2005:
+            print32(f'sra     {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, cpu.get(rs1) >> (cpu.get(rs2) & 0x3f))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0006:
+            print32(f'or      {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, cpu.get(rs1) | cpu.get(rs2))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0007:
+            print32(f'and     {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, cpu.get(rs1) & cpu.get(rs2))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0100:
+            print32(f'mul     {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, cpu.get(rs1) * cpu.get(rs2))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0101:
+            print32(f'mulh    {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, (cpu.get(rs1) * cpu.get(rs2)) >> 64)
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0102:
+            print32(f'mulhsu  {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, (cpu.get(rs1) * unsigned(cpu.get(rs2))) >> 64)
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0103:
+            print32(f'mulhu   {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, (unsigned(cpu.get(rs1)) * unsigned(cpu.get(rs2))) >> 64)
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0104:
+            print32(f'div     {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, cpu.get(rs1) // cpu.get(rs2))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0105:
+            print32(f'divu    {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, unsigned(cpu.get(rs1)) // unsigned(cpu.get(rs2)))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0106:
+            print32(f'rem     {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, cpu.get(rs1) % cpu.get(rs2))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0107:
+            print32(f'remu    {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set(rd, unsigned(cpu.get(rs1)) % unsigned(cpu.get(rs2)))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+    return False
+
+def execute_alu_w(cpu: CPU, funct3: int, rd: int, rs1: int, rs2: int, funct7: int) -> bool:
+    combined = (funct7 << 8) | funct3
+
+    match combined:
+        case 0x0000:
+            print32(f'addw    {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set32(rd, cpu.get(rs1) + cpu.get(rs2))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x2000:
+            print32(f'subw    {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set32(rd, cpu.get(rs1) - cpu.get(rs2))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0001:
+            print32(f'sllw    {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set32(rd, cpu.get(rs1) << (cpu.get(rs2) & 0x1f))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0005:
+            print32(f'srlw    {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set32(rd, unsigned(cpu.get(rs1)) >> (cpu.get(rs2) & 0x1f))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x2005:
+            print32(f'sraw    {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set32(rd, cpu.get(rs1) >> (cpu.get(rs2) & 0x3f))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0100:
+            print32(f'mulw    {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set32(rd, cpu.get(rs1) * cpu.get(rs2))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0104:
+            print32(f'divw    {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set32(rd, cpu.get(rs1) // cpu.get(rs2))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0105:
+            print32(f'divuw   {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set32(rd, unsigned(cpu.get(rs1)) // unsigned(cpu.get(rs2)))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0106:
+            print32(f'remw    {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set32(rd, cpu.get(rs1) % cpu.get(rs2))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+        case 0x0107:
+            print32(f'remuw   {r[rd]}, {r[rs1]}, {r[rs2]}')
+
+            cpu.set32(rd, unsigned(cpu.get(rs1)) % unsigned(cpu.get(rs2)))
+
+            print(f'{r[rd]} <- {cpu.get(rd)}')
+            return True
+
+    return False
+
+
+def execute_ecall(mem: AddressSpace, cpu: CPU) -> bool:
+    print32('ecall')
+
+    if cpu.get(17) == 63:
+        # read system call
+        print(f'read({cpu.get(10)}, {cpu.get(11)}, {cpu.get(12)})')
+        if cpu.get(10) != 0:
+            print(f'Invalid file descriptor in read system call: {cpu.get(10)} but only 0 (stdin) is supported', file=sys.stderr)
+            sys.exit(1)
+        if cpu.get(12) < 0:
+            print(f'Invalid buffer size in read system call: {cpu.get(12)}', file=sys.stderr)
+            sys.exit(1)
+
+        if      cpu.get(11) >= mem.memory_start and cpu.get(11) + cpu.get(12) <= mem.memory_end or \
+                cpu.get(11) >= mem.stack_start  and cpu.get(11) + cpu.get(12) <= mem.stack_end:
+            sys.stdout.flush()
+            res = sys.stdin.buffer.read(cpu.get(12))
+            for (i, b) in enumerate(res):
+                mem.sb(cpu.get(11) + i, b)
+            cpu.set(10, len(res))
+            print(f'{"":52}{r[10]} <- {cpu.get(10)}')
+            return True
+        else:
+            print(f'Invalid memory range in read system call: {cpu.get(11)} to {cpu.get(11)+cpu.get(12)}', file=sys.stderr)
+            sys.exit(1)
+
+    if cpu.get(17) == 64:
+        # write system call
+        print(f'write({cpu.get(10)}, {cpu.get(11)}, {cpu.get(12)})')
+        if cpu.get(10) != 1:
+            print(f'Invalid file descriptor in write system call: {cpu.get(10)} but only 1 (stdout) is supported', file=sys.stderr)
+            sys.exit(1)
+        if cpu.get(12) < 0:
+            print(f'Invalid buffer size in write system call: {cpu.get(12)}', file=sys.stderr)
+            sys.exit(1)
+
+        if      cpu.get(11) >= mem.memory_start and cpu.get(11) + cpu.get(12) <= mem.memory_end or \
+                cpu.get(11) >= mem.stack_start  and cpu.get(11) + cpu.get(12) <= mem.stack_end:
+            buf = bytearray(cpu.get(12))
+            for i, addr in enumerate(range(cpu.get(11), cpu.get(11) + cpu.get(12))):
+                buf[i] = mem.lbu(addr)
+            res = sys.stdout.buffer.write(buf)
+            sys.stdout.flush()
+            cpu.set(10, res)
+            print(f'{"":52}{r[10]} <- {cpu.get(10)}')
+            return True
+        else:
+            print(f'Invalid memory range in write system call: {cpu.get(11)} to {cpu.get(11)+cpu.get(12)}', file=sys.stderr)
+            sys.exit(1)
+
+    if cpu.get(17) == 93:
+        # exit system call
+        print(f'exit({cpu.get(10)})')
+        sys.stdout.flush()
+        return False
+
+    # unimplemented
+    print(f'unsupported syscall {cpu.get(17)}')
+    sys.stdout.flush()
+    return False
+
+def main() -> None:
+    # default to 'a.out' as the executable file,
+    # or let the user specify a name on the command line
+    if len(sys.argv) == 1:
+        filename = 'a.out'
+    elif len(sys.argv) == 2:
+        filename = sys.argv[1]
+    else:
+        print(f'Usage: {sys.argv[0]} <filename>', file=sys.stderr)
+        sys.exit(1)
+
+    # load the program from disk and form the
+    # simulated address space
+    address_space = load_elf(filename)
+
+    # set the initial cpu state
+    cpu = CPU(address_space.pc_start, address_space.memory_end)
+
+    # main loop
+    instruction_counter = 0
+    keep_going = True
+    while keep_going:
+        # fetch the next instruction
+        instruction = address_space.lw(cpu.pc)
+
+        # execute
+        keep_going = execute(address_space, cpu, instruction)
+
+        instruction_counter += 1
+
+    print(f'executed {instruction_counter} instructions')
+
+main()
