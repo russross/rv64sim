@@ -3,6 +3,8 @@
 import sys
 import struct
 
+MISALIGNED_OKAY = True
+
 class CPU:
     def __init__(self, pc_start: int, sp_start: int) -> None:
         self.x = [0] * 32
@@ -42,7 +44,9 @@ class AddressSpace:
 
         # allocate a stack with a guard page
         self.stack = bytearray(4096)
-        self.stack_start = memory_end + 4096
+        self.stack_start = 0x10000000 - 4096
+        if self.stack_start < memory_end + 4096:
+            self.stack_start = memory_end + 4096
         self.stack_end = self.stack_start + 4096
 
     def lb(self, addr: int) -> int:
@@ -61,7 +65,7 @@ class AddressSpace:
         return result
 
     def lh(self, addr: int) -> int:
-        if (addr & 1) != 0:
+        if not MISALIGNED_OKAY and (addr & 1) != 0:
             print(f'Bus error in lh: address is {addr}', file=sys.stderr)
             sys.exit(1)
         if      not (addr >= self.memory_start and addr+1 < self.memory_end) and \
@@ -79,7 +83,7 @@ class AddressSpace:
         return result
 
     def lw(self, addr: int) -> int:
-        if (addr & 3) != 0:
+        if not MISALIGNED_OKAY and (addr & 3) != 0:
             print(f'Bus error in lw: address is {addr}', file=sys.stderr)
             sys.exit(1)
         if      not (addr >= self.memory_start and addr+3 < self.memory_end) and \
@@ -97,7 +101,7 @@ class AddressSpace:
         return result
 
     def ld(self, addr: int) -> int:
-        if (addr & 7) != 0:
+        if not MISALIGNED_OKAY and (addr & 7) != 0:
             print(f'Bus error in ld: address is {addr}', file=sys.stderr)
             sys.exit(1)
         if      not (addr >= self.memory_start and addr+7 < self.memory_end) and \
@@ -130,7 +134,7 @@ class AddressSpace:
         return result
 
     def lhu(self, addr: int) -> int:
-        if (addr & 1) != 0:
+        if not MISALIGNED_OKAY and (addr & 1) != 0:
             print(f'Bus error in lhu: address is {addr}', file=sys.stderr)
             sys.exit(1)
         if      not (addr >= self.memory_start and addr+1 < self.memory_end) and \
@@ -148,7 +152,7 @@ class AddressSpace:
         return result
 
     def lwu(self, addr: int) -> int:
-        if (addr & 3) != 0:
+        if not MISALIGNED_OKAY and (addr & 3) != 0:
             print(f'Bus error in lwu: address is {addr}', file=sys.stderr)
             sys.exit(1)
         if      not (addr >= self.memory_start and addr+3 < self.memory_end) and \
@@ -223,6 +227,9 @@ def print32(s: str) -> None:
 
 def unsigned(i: int) -> int:
     return i&0xffffffffffffffff
+
+def unsigned32(i: int) -> int:
+    return i&0x00000000ffffffff
 
 maxint = (1<<63) - 1
 def clip(i: int) -> int:
@@ -311,8 +318,8 @@ def load_elf(filename: str) -> AddressSpace:
             if p_type != 1:
                 #print('    skipping non-loadable segment')
                 continue
-            print(f'    loading segment from offset 0x{p_offset:x} with size 0x{p_filesz:x}')
-            print(f'    into virtual address 0x{p_vaddr:x} with size 0x{p_memsz:x}')
+            #print(f'    loading segment from offset 0x{p_offset:x} with size 0x{p_filesz:x}')
+            #print(f'    into virtual address 0x{p_vaddr:x} with size 0x{p_memsz:x}')
 
             for i in range(p_filesz):
                 aspace.sb(p_vaddr + i, raw[p_offset + i])
@@ -333,33 +340,33 @@ def get_rs2(inst: int) -> int:
     return (inst>>20) & 0x1f
 
 def get_imm_i(inst: int) -> int:
-    return clip32(inst >> 20)
+    return inst >> 20
 
 def get_imm_s(inst: int) -> int:
-    imm =  (inst >> 20) & 0x00000fe0
-    imm |= (inst >> 7)  & 0x0000001f
-    return clip32(imm)
+    imm =  (inst >> 20) & ~0x0000001f
+    imm |= (inst >> 7)  &  0x0000001f
+    return imm
 
 def get_imm_b(inst: int) -> int:
-    imm =  (inst >> 20) & 0xfffff000
-    imm |= (inst << 4)  & 0x00000800
-    imm |= (inst >> 20) & 0x000007e0
-    imm |= (inst >> 7)  & 0x0000001e
-    return clip32(imm)
+    imm =  (inst >> 20) & ~0x00000fff
+    imm |= (inst << 4)  &  0x00000800
+    imm |= (inst >> 20) &  0x000007e0
+    imm |= (inst >> 7)  &  0x0000001e
+    return imm
 
 def get_imm_u(inst: int) -> int:
-    return clip32(inst & 0xfffff000)
+    return inst & ~0x00000fff
 
 def get_imm_j(inst: int) -> int:
-    imm =  (inst >> 11) & 0xfff00000
-    imm |=  inst        & 0x000ff000
-    imm |= (inst >> 9)  & 0x00000800
-    imm |= (inst >> 20) & 0x000007e0
-    imm |= (inst >> 20) & 0x0000001e
-    return clip32(imm)
+    imm =  (inst >> 11) & ~0x000fffff
+    imm |=  inst        &  0x000ff000
+    imm |= (inst >> 9)  &  0x00000800
+    imm |= (inst >> 20) &  0x000007e0
+    imm |= (inst >> 20) &  0x0000001e
+    return imm
 
 def get_funct7(inst: int) -> int:
-    return clip32(inst >> 25)
+    return inst >> 25
 
 r = [
     'zero', 'ra', 'sp', 'gp', 'tp', 't0', 't1', 't2',
@@ -431,6 +438,12 @@ def execute(mem: AddressSpace, cpu: CPU, inst: int) -> bool:
         # mul, mulh, mulhsu, mulhu, div, divu, rem, remu
         case 0x33:
             okay = execute_alu(cpu, get_funct3(inst), get_rd(inst), get_rs1(inst), get_rs2(inst), get_funct7(inst))
+            cpu.set_pc(cpu.pc + 4)
+
+        # addw, subw, sllw, srlw, sraw
+        # mulw, divw, remw, remuw 
+        case 0x3b:
+            okay = execute_alu_w(cpu, get_funct3(inst), get_rd(inst), get_rs1(inst), get_rs2(inst), get_funct7(inst))
             cpu.set_pc(cpu.pc + 4)
 
         # fence
@@ -514,7 +527,7 @@ def execute_jalr(cpu: CPU, funct3: int, rd: int, rs1: int, imm: int) -> bool:
     cpu.set_pc((rs1_val + imm) & ~1)
 
     if rd != 0:
-        print(f'{r[rd]} <- {cpu.get(rd)}', end='')
+        print(f'{r[rd]} <- {cpu.get(rd)}, ', end='')
     print(f'pc <- {cpu.pc}')
 
     return True
@@ -731,7 +744,7 @@ def execute_alu_imm(cpu: CPU, funct3: int, rd: int, rs1: int, imm: int) -> bool:
     match funct3:
         case 0:
             if rd == 0 and rs1 == 0 and imm == 0:
-                print('nop')
+                print32('nop')
             elif rs1 == 0:
                 print32(f'li      {r[rd]}, {imm}')
             elif imm == 0:
@@ -741,7 +754,9 @@ def execute_alu_imm(cpu: CPU, funct3: int, rd: int, rs1: int, imm: int) -> bool:
 
             cpu.set(rd, cpu.get(rs1) + imm)
 
-            if rd != 0:
+            if rd == 0:
+                print('--')
+            else:
                 print(f'{r[rd]} <- {cpu.get(rd)}')
             return True
 
@@ -827,11 +842,18 @@ def execute_alu_imm_w(cpu: CPU, funct3: int, rd: int, rs1: int, imm: int) -> boo
 
     match funct3:
         case 0:
-            print32(f'addiw   {r[rd]}, {r[rs1]}, {imm}')
+            if rd == 0 and rs1 == 0 and imm == 0:
+                print32('nop')
+            elif rs1 == 0:
+                print32(f'li      {r[rd]}, {imm}')
+            else:
+                print32(f'addiw   {r[rd]}, {r[rs1]}, {imm}')
 
             cpu.set32(rd, cpu.get(rs1) + imm)
 
-            if rd != 0:
+            if rd == 0:
+                print('--')
+            else:
                 print(f'{r[rd]} <- {cpu.get(rd)}')
             return True
 
@@ -850,14 +872,14 @@ def execute_alu_imm_w(cpu: CPU, funct3: int, rd: int, rs1: int, imm: int) -> boo
             if imm_high == 0x00:
                 print32(f'srliw   {r[rd]}, {r[rs1]}, {shamt}')
 
-                cpu.set32(rd, unsigned(cpu.get(rs1)) >> shamt)
+                cpu.set32(rd, unsigned32(cpu.get(rs1)) >> shamt)
 
                 print(f'{r[rd]} <- {cpu.get(rd)}')
                 return True
             elif imm_high == 0x20:
                 print32(f'sraiw   {r[rd]}, {r[rs1]}, {shamt}')
 
-                cpu.set32(rd, cpu.get(rs1) >> shamt)
+                cpu.set32(rd, clip32(cpu.get(rs1)) >> shamt)
 
                 print(f'{r[rd]} <- {cpu.get(rd)}')
                 return True
@@ -995,7 +1017,10 @@ def execute_alu(cpu: CPU, funct3: int, rd: int, rs1: int, rs2: int, funct7: int)
         case 0x0104:
             print32(f'div     {r[rd]}, {r[rs1]}, {r[rs2]}')
 
-            cpu.set(rd, cpu.get(rs1) // cpu.get(rs2))
+            if cpu.get(rs2) == 0:
+                cpu.set(rd, -1)
+            else:
+                cpu.set(rd, int(cpu.get(rs1) / cpu.get(rs2)))
 
             print(f'{r[rd]} <- {cpu.get(rd)}')
             return True
@@ -1003,7 +1028,10 @@ def execute_alu(cpu: CPU, funct3: int, rd: int, rs1: int, rs2: int, funct7: int)
         case 0x0105:
             print32(f'divu    {r[rd]}, {r[rs1]}, {r[rs2]}')
 
-            cpu.set(rd, unsigned(cpu.get(rs1)) // unsigned(cpu.get(rs2)))
+            if cpu.get(rs2) == 0:
+                cpu.set(rd, -1)
+            else:
+                cpu.set(rd, unsigned(cpu.get(rs1)) // unsigned(cpu.get(rs2)))
 
             print(f'{r[rd]} <- {cpu.get(rd)}')
             return True
@@ -1011,7 +1039,10 @@ def execute_alu(cpu: CPU, funct3: int, rd: int, rs1: int, rs2: int, funct7: int)
         case 0x0106:
             print32(f'rem     {r[rd]}, {r[rs1]}, {r[rs2]}')
 
-            cpu.set(rd, cpu.get(rs1) % cpu.get(rs2))
+            if cpu.get(rs2) == 0:
+                cpu.set(rd, cpu.get(rs1))
+            else:
+                cpu.set(rd, cpu.get(rs1) - int(cpu.get(rs1) / cpu.get(rs2)) * cpu.get(rs2))
 
             print(f'{r[rd]} <- {cpu.get(rd)}')
             return True
@@ -1019,7 +1050,10 @@ def execute_alu(cpu: CPU, funct3: int, rd: int, rs1: int, rs2: int, funct7: int)
         case 0x0107:
             print32(f'remu    {r[rd]}, {r[rs1]}, {r[rs2]}')
 
-            cpu.set(rd, unsigned(cpu.get(rs1)) % unsigned(cpu.get(rs2)))
+            if cpu.get(rs2) == 0:
+                cpu.set(rd, cpu.get(rs1))
+            else:
+                cpu.set(rd, unsigned(cpu.get(rs1)) % unsigned(cpu.get(rs2)))
 
             print(f'{r[rd]} <- {cpu.get(rd)}')
             return True
@@ -1057,7 +1091,7 @@ def execute_alu_w(cpu: CPU, funct3: int, rd: int, rs1: int, rs2: int, funct7: in
         case 0x0005:
             print32(f'srlw    {r[rd]}, {r[rs1]}, {r[rs2]}')
 
-            cpu.set32(rd, unsigned(cpu.get(rs1)) >> (cpu.get(rs2) & 0x1f))
+            cpu.set32(rd, unsigned32(cpu.get(rs1)) >> (cpu.get(rs2) & 0x1f))
 
             print(f'{r[rd]} <- {cpu.get(rd)}')
             return True
@@ -1065,7 +1099,7 @@ def execute_alu_w(cpu: CPU, funct3: int, rd: int, rs1: int, rs2: int, funct7: in
         case 0x2005:
             print32(f'sraw    {r[rd]}, {r[rs1]}, {r[rs2]}')
 
-            cpu.set32(rd, cpu.get(rs1) >> (cpu.get(rs2) & 0x3f))
+            cpu.set32(rd, clip32(cpu.get(rs1)) >> (cpu.get(rs2) & 0x1f))
 
             print(f'{r[rd]} <- {cpu.get(rd)}')
             return True
@@ -1081,7 +1115,10 @@ def execute_alu_w(cpu: CPU, funct3: int, rd: int, rs1: int, rs2: int, funct7: in
         case 0x0104:
             print32(f'divw    {r[rd]}, {r[rs1]}, {r[rs2]}')
 
-            cpu.set32(rd, cpu.get(rs1) // cpu.get(rs2))
+            if cpu.get(rs2) == 0:
+                cpu.set32(rd, -1)
+            else:
+                cpu.set32(rd, int(cpu.get(rs1) / cpu.get(rs2)))
 
             print(f'{r[rd]} <- {cpu.get(rd)}')
             return True
@@ -1089,7 +1126,10 @@ def execute_alu_w(cpu: CPU, funct3: int, rd: int, rs1: int, rs2: int, funct7: in
         case 0x0105:
             print32(f'divuw   {r[rd]}, {r[rs1]}, {r[rs2]}')
 
-            cpu.set32(rd, unsigned(cpu.get(rs1)) // unsigned(cpu.get(rs2)))
+            if cpu.get(rs2) == 0:
+                cpu.set32(rd, -1)
+            else:
+                cpu.set32(rd, unsigned(cpu.get(rs1)) // unsigned(cpu.get(rs2)))
 
             print(f'{r[rd]} <- {cpu.get(rd)}')
             return True
@@ -1097,7 +1137,10 @@ def execute_alu_w(cpu: CPU, funct3: int, rd: int, rs1: int, rs2: int, funct7: in
         case 0x0106:
             print32(f'remw    {r[rd]}, {r[rs1]}, {r[rs2]}')
 
-            cpu.set32(rd, cpu.get(rs1) % cpu.get(rs2))
+            if cpu.get(rs2) == 0:
+                cpu.set32(rd, cpu.get(rs1))
+            else:
+                cpu.set32(rd, cpu.get(rs1) - int(cpu.get(rs1) / cpu.get(rs2)) * cpu.get(rs2))
 
             print(f'{r[rd]} <- {cpu.get(rd)}')
             return True
@@ -1105,7 +1148,10 @@ def execute_alu_w(cpu: CPU, funct3: int, rd: int, rs1: int, rs2: int, funct7: in
         case 0x0107:
             print32(f'remuw   {r[rd]}, {r[rs1]}, {r[rs2]}')
 
-            cpu.set32(rd, unsigned(cpu.get(rs1)) % unsigned(cpu.get(rs2)))
+            if cpu.get(rs2) == 0:
+                cpu.set32(rd, cpu.get(rs1))
+            else:
+                cpu.set32(rd, unsigned(cpu.get(rs1)) % unsigned(cpu.get(rs2)))
 
             print(f'{r[rd]} <- {cpu.get(rd)}')
             return True
@@ -1154,6 +1200,7 @@ def execute_ecall(mem: AddressSpace, cpu: CPU) -> bool:
             buf = bytearray(cpu.get(12))
             for i, addr in enumerate(range(cpu.get(11), cpu.get(11) + cpu.get(12))):
                 buf[i] = mem.lbu(addr)
+            sys.stdout.flush()
             res = sys.stdout.buffer.write(buf)
             sys.stdout.flush()
             cpu.set(10, res)
