@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
+from dataclasses import dataclass
 import sys
 import struct
+from typing import Callable, Optional
 
 MISALIGNED_OKAY = True
 
@@ -221,6 +223,25 @@ class AddressSpace:
             for (i, b) in enumerate(raw):
                 self.stack[addr+i - self.stack_start] = b
 
+@dataclass
+class Instruction:
+    address: int
+    instruction: int
+    mnemonic: str
+    operands: tuple[str, ...]
+    execute: Callable[[CPU, AddressSpace], None]
+    static_target: Optional[int] = None
+    label: Optional[str] = None
+    is_target: bool = False
+    base_instructions: Optional[tuple['Instruction']] = None
+
+class InvalidInstruction(Exception):
+    def __init__(self, address: int, inst: int, msg: str):
+        self.address = address
+        self.inst = inst
+        self.msg = msg
+
+
 # misc helpers
 def print32(s: str) -> None:
     print(f'{s:<32}', end='')
@@ -379,6 +400,758 @@ r = [
     's8', 's9', 's10', 's11', 't3', 't4', 't5', 't6',
 ]
 
+def decode(address: int, inst: int) -> Instruction:
+    # divide the instructions up according the main instruction opcode
+    # then call a specialized function for each opcode to do the rest
+    opcode = inst & 0x7f
+    match opcode:
+        # lui
+        case 0x37:
+            return decode_lui(address, inst, get_rd(inst), get_imm_u(inst))
+
+        # auipc
+        case 0x17:
+            return decode_auipc(address, inst, get_rd(inst), get_imm_u(inst))
+
+        # jal
+        case 0x6f:
+            return decode_jal(address, inst, get_rd(inst), get_imm_j(inst))
+
+        # jalr
+        case 0x67:
+            return decode_jalr(address, inst, get_funct3(inst), get_rd(inst), get_rs1(inst), get_imm_i(inst))
+
+        # beq, bne, blt, bge, bltu, bgeu
+        case 0x63:
+            return decode_branches(address, inst, get_funct3(inst), get_rs1(inst), get_rs2(inst), get_imm_b(inst))
+
+        # lb, lh, lw, ld, lbu, lhu, lwu
+        case 0x03:
+            return decode_load(address, inst, get_funct3(inst), get_rd(inst), get_rs1(inst), get_imm_i(inst))
+
+        # sb, sh, sw, sd
+        case 0x23:
+            return decode_store(address, inst, get_funct3(inst), get_rs1(inst), get_rs2(inst), get_imm_s(inst))
+
+        # addi, slti, sltiu, xori, ori, andi, slli, srli, srai
+        case 0x13:
+            return decode_alu_imm(address, inst, get_funct3(inst), get_rd(inst), get_rs1(inst), get_imm_i(inst))
+
+        # addiw, slliw, srliw, sraiw
+        case 0x1b:
+            return decode_alu_imm_w(address, inst, get_funct3(inst), get_rd(inst), get_rs1(inst), get_imm_i(inst))
+
+        # add, sub, sll, slt, sltu, xor, srl, sra, or, and
+        # mul, mulh, mulhsu, mulhu, div, divu, rem, remu
+        case 0x33:
+            return decode_alu(address, inst, get_funct3(inst), get_rd(inst), get_rs1(inst), get_rs2(inst), get_funct7(inst))
+
+        # addw, subw, sllw, srlw, sraw
+        # mulw, divw, remw, remuw 
+        case 0x3b:
+            return decode_alu_w(address, inst, get_funct3(inst), get_rd(inst), get_rs1(inst), get_rs2(inst), get_funct7(inst))
+
+        # fence
+        case 0x0f:
+            # ignore this instruction
+            print32('fence     *')
+            print('--')
+
+        # ecall, ebreak
+        case 0x73:
+            if inst == 0x00000073:
+                return decode_ecall(address, inst)
+
+                # TODO: if ecall was an exit syscall we quit gracefully
+            elif inst == 0x00100073:
+                # handle ebreak here--print the instruction and exit
+                def execute_ebreak(cpu: CPU, mem: AddressSpace) -> None:
+                    print('ebreak')
+                    sys.exit(0)
+
+                return Instruction(address, inst, 'ebreak', (), execute_ebreak)
+
+    raise InvalidInstruction(address, inst, f'unknown opcode {opcode}')
+
+def decode_lui(address: int, inst: int, rd: int, imm: int) -> Instruction:
+    def execute_lui(cpu: CPU, mem: AddressSpace) -> None:
+        cpu.set(rd, imm)
+        cpu.set_pc(cpu.pc + 4)
+        print(f'{r[rd]} <- {cpu.get(rd)}')
+
+    return Instruction(address, inst, 'lui', (f'{r[rd]}', f'{imm}'), execute_lui)
+
+def decode_auipc(address: int, inst: int, rd: int, imm: int) -> Instruction:
+    def execute_auipc(cpu: CPU, mem: AddressSpace) -> None:
+        cpu.set(rd, cpu.pc + imm)
+        cpu.set_pc(cpu.pc + 4)
+        print(f'{r[rd]} <- {cpu.get(rd)}')
+
+    return Instruction(address, inst, 'auipc', (f'{r[rd]}', f'{imm}'), execute_auipc)
+
+def decode_jal(address: int, inst: int, rd: int, imm: int) -> Instruction:
+    def execute_jal(cpu: CPU, mem: AddressSpace) -> None:
+        cpu.set(rd, cpu.pc + 4)
+        cpu.set_pc(cpu.pc + imm)
+        if rd != 0:
+            print(f'{r[rd]} <- {cpu.get(rd)}, ', end='')
+        print(f'pc <- {cpu.pc}')
+
+    return Instruction(address, inst, 'jal', (f'{r[rd]}', f'{address+imm}'), execute_jal, static_target=address+imm)
+
+def decode_jalr(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: int) -> Instruction:
+    if funct3 != 0:
+        raise InvalidInstruction(address, inst, f'jalr with unknown funct3 value of {funct3}')
+
+    def execute_jalr(cpu: CPU, mem: AddressSpace) -> None:
+        # rd and rs1 could be the same, so capture rs1 before setting rd
+        rs1_val = cpu.get(rs1)
+        cpu.set(rd, cpu.pc + 4)
+        cpu.set_pc((rs1_val + imm) & ~1)
+
+        if rd != 0:
+            print(f'{r[rd]} <- {cpu.get(rd)}, ', end='')
+        print(f'pc <- {cpu.pc}')
+
+    return Instruction(address, inst, 'jalr', (f'{r[rd]}', f'{imm}({r[rs1]})'), execute_jalr)
+
+def decode_branches(address: int, inst: int, funct3: int, rs1: int, rs2: int, imm: int) -> Instruction:
+    match funct3:
+        case 0:
+            def execute_beq(cpu: CPU, mem: AddressSpace) -> None:
+                if cpu.get(rs1) == cpu.get(rs2):
+                    cpu.set_pc(cpu.pc + imm)
+                    print(f'pc <- {cpu.pc}')
+                else:
+                    cpu.set_pc(cpu.pc + 4)
+                    print('--')
+
+            return Instruction(address, inst, 'beq', (f'{r[rs1]}', f'{r[rs2]}', f'{imm}'), execute_beq, static_target=address+imm)
+
+        case 1:
+            def execute_bne(cpu: CPU, mem: AddressSpace) -> None:
+                if cpu.get(rs1) != cpu.get(rs2):
+                    cpu.set_pc(cpu.pc + imm)
+                    print(f'pc <- {cpu.pc}')
+                else:
+                    cpu.set_pc(cpu.pc + 4)
+                    print('--')
+
+            return Instruction(address, inst, 'bne', (f'{r[rs1]}', f'{r[rs2]}', f'{imm}'), execute_bne, static_target=address+imm)
+
+        case 4:
+            def execute_blt(cpu: CPU, mem: AddressSpace) -> None:
+                if cpu.get(rs1) < cpu.get(rs2):
+                    cpu.set_pc(cpu.pc + imm)
+                    print(f'pc <- {cpu.pc}')
+                else:
+                    cpu.set_pc(cpu.pc + 4)
+                    print('--')
+
+            return Instruction(address, inst, 'blt', (f'{r[rs1]}', f'{r[rs2]}', f'{imm}'), execute_blt, static_target=address+imm)
+
+        case 5:
+            def execute_bge(cpu: CPU, mem: AddressSpace) -> None:
+                if cpu.get(rs1) >= cpu.get(rs2):
+                    cpu.set_pc(cpu.pc + imm)
+                    print(f'pc <- {cpu.pc}')
+                else:
+                    cpu.set_pc(cpu.pc + 4)
+                    print('--')
+
+            return Instruction(address, inst, 'bge', (f'{r[rs1]}', f'{r[rs2]}', f'{imm}'), execute_bge, static_target=address+imm)
+
+        case 6:
+            def execute_bltu(cpu: CPU, mem: AddressSpace) -> None:
+                if unsigned(cpu.get(rs1)) < unsigned(cpu.get(rs2)):
+                    cpu.set_pc(cpu.pc + imm)
+                    print(f'pc <- {cpu.pc}')
+                else:
+                    cpu.set_pc(cpu.pc + 4)
+                    print('--')
+
+            return Instruction(address, inst, 'bltu', (f'{r[rs1]}', f'{r[rs2]}', f'{imm}'), execute_bltu)
+
+        case 7:
+            def execute_bgeu(cpu: CPU, mem: AddressSpace) -> None:
+                if unsigned(cpu.get(rs1)) >= unsigned(cpu.get(rs2)):
+                    cpu.set_pc(cpu.pc + imm)
+                    print(f'pc <- {cpu.pc}')
+                else:
+                    cpu.set_pc(cpu.pc + 4)
+                    print('--')
+
+            return Instruction(address, inst, 'bgeu', (f'{r[rs1]}', f'{r[rs2]}', f'{imm}'), execute_bgeu)
+
+        case _:
+            raise InvalidInstruction(address, inst, f'branch of unknown type {funct3}')
+
+def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: int) -> Instruction:
+    match funct3:
+        case 0:
+            def execute_lb(cpu: CPU, mem: AddressSpace) -> None:
+                effective_address = cpu.get(rs1) + imm
+                cpu.set(rd, mem.lb(effective_address))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)} ({address})')
+
+            return Instruction(address, inst, 'lb', (f'{r[rd]}', f'{imm}({r[rs1]})'), execute_lb)
+
+        case 1:
+            def execute_lh(cpu: CPU, mem: AddressSpace) -> None:
+                effective_address = cpu.get(rs1) + imm
+                cpu.set(rd, mem.lh(effective_address))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)} ({address})')
+
+            return Instruction(address, inst, 'lh', (f'{r[rd]}', f'{imm}({r[rs1]})'), execute_lh)
+
+        case 2:
+            def execute_lw(cpu: CPU, mem: AddressSpace) -> None:
+                effective_address = cpu.get(rs1) + imm
+                cpu.set(rd, mem.lw(effective_address))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)} ({address})')
+
+            return Instruction(address, inst, 'lw', (f'{r[rd]}', f'{imm}({r[rs1]})'), execute_lw)
+
+        case 3:
+            def execute_ld(cpu: CPU, mem: AddressSpace) -> None:
+                effective_address = cpu.get(rs1) + imm
+                cpu.set(rd, mem.ld(effective_address))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)} ({address})')
+
+            return Instruction(address, inst, 'ld', (f'{r[rd]}', f'{imm}({r[rs1]})'), execute_ld)
+
+        case 4:
+            def execute_lbu(cpu: CPU, mem: AddressSpace) -> None:
+                effective_address = cpu.get(rs1) + imm
+                cpu.set(rd, mem.lbu(effective_address))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)} ({address})')
+
+            return Instruction(address, inst, 'lbu', (f'{r[rd]}', f'{imm}({r[rs1]})'), execute_lbu)
+
+        case 5:
+            def execute_lhu(cpu: CPU, mem: AddressSpace) -> None:
+                effective_address = cpu.get(rs1) + imm
+                cpu.set(rd, mem.lhu(effective_address))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)} ({address})')
+
+            return Instruction(address, inst, 'lhu', (f'{r[rd]}', f'{imm}({r[rs1]})'), execute_lhu)
+
+        case 6:
+            def execute_lwu(cpu: CPU, mem: AddressSpace) -> None:
+                effective_address = cpu.get(rs1) + imm
+                cpu.set(rd, mem.lwu(effective_address))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)} ({address})')
+
+            return Instruction(address, inst, 'lwu', (f'{r[rd]}', f'{imm}({r[rs1]})'), execute_lwu)
+
+    raise InvalidInstruction(address, inst, f'load instruction of unknown type {funct3}')
+
+def decode_store(address: int, inst: int, funct3: int, rs1: int, rs2: int, imm: int) -> Instruction:
+    match funct3:
+        case 0:
+            def execute_sb(cpu: CPU, mem: AddressSpace) -> None:
+                effective_address = cpu.get(rs1) + imm
+                val8 = cpu.get(rs2) & 0xff
+                mem.sb(effective_address, val8)
+                cpu.set_pc(cpu.pc + 4)
+                print(f'({effective_address}) <- {val8}')
+
+            return Instruction(address, inst, 'sb', (f'{r[rs2]}', f'{imm}({r[rs1]})'), execute_sb)
+
+        case 1:
+            def execute_sh(cpu: CPU, mem: AddressSpace) -> None:
+                effective_address = cpu.get(rs1) + imm
+                val16 = cpu.get(rs2) & 0xffff
+                mem.sh(effective_address, val16)
+                cpu.set_pc(cpu.pc + 4)
+                print(f'({effective_address}) <- {val16}')
+
+            return Instruction(address, inst, 'sh', (f'{r[rs2]}', f'{imm}({r[rs1]})'), execute_sh)
+
+        case 2:
+            def execute_sw(cpu: CPU, mem: AddressSpace) -> None:
+                effective_address = cpu.get(rs1) + imm
+                val32 = cpu.get(rs2) & 0xffffffff
+                mem.sw(effective_address, val32)
+                cpu.set_pc(cpu.pc + 4)
+                print(f'({effective_address}) <- {val32}')
+
+            return Instruction(address, inst, 'sw', (f'{r[rs2]}', f'{imm}({r[rs1]})'), execute_sw)
+
+        case 3:
+            def execute_sd(cpu: CPU, mem: AddressSpace) -> None:
+                effective_address = cpu.get(rs1) + imm
+                mem.sd(effective_address, cpu.get(rs2))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'({effective_address}) <- {cpu.get(rs2)}')
+
+            return Instruction(address, inst, 'sd', (f'{r[rs2]}', f'{imm}({r[rs1]})'), execute_sd)
+
+    raise InvalidInstruction(address, inst, f'store instruction of unknown type {funct3}')
+
+def decode_alu_imm(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: int) -> Instruction:
+    shamt = imm & 0x3f
+    imm_high = imm>>6
+
+    match funct3:
+        case 0:
+            def execute_addi(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, cpu.get(rs1) + imm)
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'addi', (f'{r[rd]}', f'{r[rs1]}', f'{imm}'), execute_addi)
+
+        case 2:
+            def execute_slti(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, 1 if cpu.get(rs1) < imm else 0)
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'slti', (f'{r[rd]}', f'{r[rs1]}', f'{imm}'), execute_slti)
+
+        case 3:
+            def execute_sltiu(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, 1 if unsigned(cpu.get(rs1)) < unsigned(imm) else 0)
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'sltiu', (f'{r[rd]}', f'{r[rs1]}', f'{imm}'), execute_sltiu)
+
+        case 4:
+            def execute_xori(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, cpu.get(rs1) ^ unsigned(imm))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'xori', (f'{r[rd]}', f'{r[rs1]}', f'{imm}'), execute_xori)
+
+        case 6:
+            def execute_ori(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, cpu.get(rs1) | imm)
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'ori', (f'{r[rd]}', f'{r[rs1]}', f'{imm}'), execute_ori)
+
+        case 7:
+            def execute_andi(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, cpu.get(rs1) & imm)
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'andi', (f'{r[rd]}', f'{r[rs1]}', f'{imm}'), execute_andi)
+
+        case 1:
+            if imm_high != 0x00:
+                raise InvalidInstruction(address, inst, f'immediate mode alu instruction of type {funct3} with unknown subtype {imm_high}')
+
+            def execute_slli(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, cpu.get(rs1) << shamt)
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'slli', (f'{r[rd]}', f'{r[rs1]}', f'{shamt}'), execute_slli)
+
+        case 5:
+            if imm_high == 0x00:
+                def execute_srli(cpu: CPU, mem: AddressSpace) -> None:
+                    cpu.set(rd, unsigned(cpu.get(rs1)) >> shamt)
+                    cpu.set_pc(cpu.pc + 4)
+                    print(f'{r[rd]} <- {cpu.get(rd)}')
+
+                return Instruction(address, inst, 'srli', (f'{r[rd]}', f'{r[rs1]}', f'{shamt}'), execute_srli)
+
+            elif imm_high == 0x10:
+                def execute_srai(cpu: CPU, mem: AddressSpace) -> None:
+                    cpu.set(rd, cpu.get(rs1) >> shamt)
+                    cpu.set_pc(cpu.pc + 4)
+                    print(f'{r[rd]} <- {cpu.get(rd)}')
+
+                return Instruction(address, inst, 'srai', (f'{r[rd]}', f'{r[rs1]}', f'{shamt}'), execute_srai)
+
+            raise InvalidInstruction(address, inst, f'immediate mode alu instruction of type {funct3} with unknown subtype {imm_high}')
+            
+    raise InvalidInstruction(address, inst, f'immediate mode alu instruction of unknown type {funct3}')
+
+def decode_alu_imm_w(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: int) -> Instruction:
+    shamt = imm & 0x1f
+    imm_high = imm>>5
+
+    match funct3:
+        case 0:
+            def execute_addiw(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set32(rd, cpu.get(rs1) + imm)
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'addiw', (f'{r[rd]}', f'{r[rs1]}', f'{imm}'), execute_addiw)
+
+        case 1:
+            if imm_high != 0x00:
+                raise InvalidInstruction(address, inst, f'immediate mode alu w instruction of type {funct3} with unknown subtype {imm_high}')
+
+            def execute_slliw(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set32(rd, cpu.get(rs1) << shamt)
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'slliw', (f'{r[rd]}', f'{r[rs1]}', f'{shamt}'), execute_slliw)
+
+        case 5:
+            if imm_high == 0x00:
+                def execute_srliw(cpu: CPU, mem: AddressSpace) -> None:
+                    cpu.set32(rd, unsigned32(cpu.get(rs1)) >> shamt)
+                    cpu.set_pc(cpu.pc + 4)
+                    print(f'{r[rd]} <- {cpu.get(rd)}')
+
+                return Instruction(address, inst, 'srliw', (f'{r[rd]}', f'{r[rs1]}', f'{shamt}'), execute_srliw)
+
+            elif imm_high == 0x20:
+                def execute_sraiw(cpu: CPU, mem: AddressSpace) -> None:
+                    cpu.set32(rd, clip32(cpu.get(rs1)) >> shamt)
+                    cpu.set_pc(cpu.pc + 4)
+                    print(f'{r[rd]} <- {cpu.get(rd)}')
+
+                return Instruction(address, inst, 'sraiw', (f'{r[rd]}', f'{r[rs1]}', f'{shamt}'), execute_sraiw)
+
+            raise InvalidInstruction(address, inst, f'immediate mode alu w instruction of type {funct3} with unknown subtype {imm_high}')
+
+    raise InvalidInstruction(address, inst, f'immediate mode alu w instruction of unknown type {funct3}')
+
+def decode_alu(address: int, inst: int, funct3: int, rd: int, rs1: int, rs2: int, funct7: int) -> Instruction:
+    combined = (funct7 << 8) | funct3
+
+    match combined:
+        case 0x0000:
+            def execute_add(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, cpu.get(rs1) + cpu.get(rs2))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'add', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_add)
+
+        case 0x2000:
+            def execute_sub(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, cpu.get(rs1) - cpu.get(rs2))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'sub', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_sub)
+
+        case 0x0001:
+            def execute_sll(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, cpu.get(rs1) << (cpu.get(rs2) & 0x3f))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'sll', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_sll)
+
+        case 0x0002:
+            def execute_slt(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, 1 if cpu.get(rs1) < cpu.get(rs2) else 0)
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'slt', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_slt)
+
+        case 0x0003:
+            def execute_sltu(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, 1 if unsigned(cpu.get(rs1)) < unsigned(cpu.get(rs2)) else 0)
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'sltu', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_sltu)
+
+        case 0x0004:
+            def execute_xor(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, cpu.get(rs1) ^ cpu.get(rs2))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'xor', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_xor)
+
+        case 0x0005:
+            def execute_srl(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, unsigned(cpu.get(rs1)) >> (cpu.get(rs2) & 0x3f))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'srl', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_srl)
+
+        case 0x2005:
+            def execute_sra(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, cpu.get(rs1) >> (cpu.get(rs2) & 0x3f))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'sra', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_sra)
+
+        case 0x0006:
+            def execute_or(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, cpu.get(rs1) | cpu.get(rs2))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'or', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_or)
+
+        case 0x0007:
+            def execute_and(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, cpu.get(rs1) & cpu.get(rs2))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'and', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_and)
+
+        case 0x0100:
+            def execute_mul(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, cpu.get(rs1) * cpu.get(rs2))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'mul', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_mul)
+
+        case 0x0101:
+            def execute_mulh(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, (cpu.get(rs1) * cpu.get(rs2)) >> 64)
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'mulh', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_mulh)
+
+        case 0x0102:
+            def execute_mulhsu(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, (cpu.get(rs1) * unsigned(cpu.get(rs2))) >> 64)
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'mulhsu', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_mulhsu)
+
+        case 0x0103:
+            def execute_mulhu(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set(rd, (unsigned(cpu.get(rs1)) * unsigned(cpu.get(rs2))) >> 64)
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'mulhu', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_mulhu)
+
+        case 0x0104:
+            def execute_div(cpu: CPU, mem: AddressSpace) -> None:
+                if cpu.get(rs2) == 0:
+                    cpu.set(rd, -1)
+                else:
+                    cpu.set(rd, int(cpu.get(rs1) / cpu.get(rs2)))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'div', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_div)
+
+        case 0x0105:
+            def execute_divu(cpu: CPU, mem: AddressSpace) -> None:
+                if cpu.get(rs2) == 0:
+                    cpu.set(rd, -1)
+                else:
+                    cpu.set(rd, unsigned(cpu.get(rs1)) // unsigned(cpu.get(rs2)))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'divu', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_divu)
+
+        case 0x0106:
+            def execute_rem(cpu: CPU, mem: AddressSpace) -> None:
+                if cpu.get(rs2) == 0:
+                    cpu.set(rd, cpu.get(rs1))
+                else:
+                    cpu.set(rd, cpu.get(rs1) - int(cpu.get(rs1) / cpu.get(rs2)) * cpu.get(rs2))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'rem', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_rem)
+
+        case 0x0107:
+            def execute_remu(cpu: CPU, mem: AddressSpace) -> None:
+                if cpu.get(rs2) == 0:
+                    cpu.set(rd, cpu.get(rs1))
+                else:
+                    cpu.set(rd, unsigned(cpu.get(rs1)) % unsigned(cpu.get(rs2)))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'remu', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_remu)
+
+    raise InvalidInstruction(address, inst, f'alu instruction of unknown type {funct3} subtype {funct7}')
+
+def decode_alu_w(address: int, inst: int, funct3: int, rd: int, rs1: int, rs2: int, funct7: int) -> Instruction:
+    combined = (funct7 << 8) | funct3
+
+    match combined:
+        case 0x0000:
+            def execute_addw(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set32(rd, cpu.get(rs1) + cpu.get(rs2))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'addw', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_addw)
+
+        case 0x2000:
+            def execute_subw(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set32(rd, cpu.get(rs1) - cpu.get(rs2))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'subw', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_subw)
+
+        case 0x0001:
+            def execute_sllw(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set32(rd, cpu.get(rs1) << (cpu.get(rs2) & 0x1f))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'sllw', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_sllw)
+
+        case 0x0005:
+            def execute_srlw(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set32(rd, unsigned32(cpu.get(rs1)) >> (cpu.get(rs2) & 0x1f))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'srlw', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_srlw)
+
+        case 0x2005:
+            def execute_sraw(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set32(rd, clip32(cpu.get(rs1)) >> (cpu.get(rs2) & 0x1f))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'sraw', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_sraw)
+
+        case 0x0100:
+            def execute_mulw(cpu: CPU, mem: AddressSpace) -> None:
+                cpu.set32(rd, cpu.get(rs1) * cpu.get(rs2))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'mulw', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_mulw)
+
+        case 0x0104:
+            def execute_divw(cpu: CPU, mem: AddressSpace) -> None:
+                if cpu.get(rs2) == 0:
+                    cpu.set32(rd, -1)
+                else:
+                    cpu.set32(rd, int(cpu.get(rs1) / cpu.get(rs2)))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'divw', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_divw)
+
+        case 0x0105:
+            def execute_divuw(cpu: CPU, mem: AddressSpace) -> None:
+                if cpu.get(rs2) == 0:
+                    cpu.set32(rd, -1)
+                else:
+                    cpu.set32(rd, unsigned(cpu.get(rs1)) // unsigned(cpu.get(rs2)))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'divuw', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_divuw)
+
+        case 0x0106:
+            def execute_remw(cpu: CPU, mem: AddressSpace) -> None:
+                if cpu.get(rs2) == 0:
+                    cpu.set32(rd, cpu.get(rs1))
+                else:
+                    cpu.set32(rd, cpu.get(rs1) - int(cpu.get(rs1) / cpu.get(rs2)) * cpu.get(rs2))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'remw', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_remw)
+
+        case 0x0107:
+            def execute_remuw(cpu: CPU, mem: AddressSpace) -> None:
+                if cpu.get(rs2) == 0:
+                    cpu.set32(rd, cpu.get(rs1))
+                else:
+                    cpu.set32(rd, unsigned(cpu.get(rs1)) % unsigned(cpu.get(rs2)))
+                cpu.set_pc(cpu.pc + 4)
+                print(f'{r[rd]} <- {cpu.get(rd)}')
+
+            return Instruction(address, inst, 'remuw', (f'{r[rd]}', f'{r[rs1]}', f'{r[rs2]}'), execute_remuw)
+
+    raise InvalidInstruction(address, inst, f'alu w instruction of unknown type {funct3} subtype {funct7}')
+
+
+def decode_ecall(address: int, inst: int) -> Instruction:
+    def execute_ecall(cpu: CPU, mem: AddressSpace) -> None:
+        if cpu.get(17) == 63:
+            # read system call
+            print(f'read({cpu.get(10)}, {cpu.get(11)}, {cpu.get(12)})')
+            if cpu.get(10) != 0:
+                print(f'Invalid file descriptor in read system call: {cpu.get(10)} but only 0 (stdin) is supported', file=sys.stderr)
+                sys.exit(1)
+            if cpu.get(12) < 0:
+                print(f'Invalid buffer size in read system call: {cpu.get(12)}', file=sys.stderr)
+                sys.exit(1)
+
+            if      cpu.get(11) >= mem.memory_start and cpu.get(11) + cpu.get(12) <= mem.memory_end or \
+                    cpu.get(11) >= mem.stack_start  and cpu.get(11) + cpu.get(12) <= mem.stack_end:
+                sys.stdout.flush()
+                read_res = sys.stdin.buffer.read(cpu.get(12))
+                for (i, b) in enumerate(read_res):
+                    mem.sb(cpu.get(11) + i, b)
+                cpu.set(10, len(read_res))
+                print(f'{"":52}{r[10]} <- {cpu.get(10)}')
+                cpu.set_pc(cpu.pc + 4)
+                return
+            else:
+                print(f'Invalid memory range in read system call: {cpu.get(11)} to {cpu.get(11)+cpu.get(12)}', file=sys.stderr)
+                sys.exit(1)
+
+        if cpu.get(17) == 64:
+            # write system call
+            print(f'write({cpu.get(10)}, {cpu.get(11)}, {cpu.get(12)})')
+            if cpu.get(10) != 1:
+                print(f'Invalid file descriptor in write system call: {cpu.get(10)} but only 1 (stdout) is supported', file=sys.stderr)
+                sys.exit(1)
+            if cpu.get(12) < 0:
+                print(f'Invalid buffer size in write system call: {cpu.get(12)}', file=sys.stderr)
+                sys.exit(1)
+
+            if      cpu.get(11) >= mem.memory_start and cpu.get(11) + cpu.get(12) <= mem.memory_end or \
+                    cpu.get(11) >= mem.stack_start  and cpu.get(11) + cpu.get(12) <= mem.stack_end:
+                buf = bytearray(cpu.get(12))
+                for i, addr in enumerate(range(cpu.get(11), cpu.get(11) + cpu.get(12))):
+                    buf[i] = mem.lbu(addr)
+                sys.stdout.flush()
+                write_res = sys.stdout.buffer.write(buf)
+                sys.stdout.flush()
+                cpu.set(10, write_res)
+                print(f'{"":52}{r[10]} <- {cpu.get(10)}')
+                cpu.set_pc(cpu.pc + 4)
+                return
+            else:
+                print(f'Invalid memory range in write system call: {cpu.get(11)} to {cpu.get(11)+cpu.get(12)}', file=sys.stderr)
+                sys.exit(1)
+
+        if cpu.get(17) == 93:
+            # exit system call
+            print(f'exit({cpu.get(10)})')
+            sys.stdout.flush()
+            sys.exit(cpu.get(10))
+
+        # unimplemented
+        print(f'unsupported syscall {cpu.get(17)}')
+        sys.stdout.flush()
+        sys.exit(1)
+
+    return Instruction(address, inst, 'ecall', (), execute_ecall)
+
 def execute(mem: AddressSpace, cpu: CPU, inst: int) -> bool:
     okay = False
 
@@ -491,11 +1264,11 @@ def execute_auipc(cpu: CPU, rd: int, imm: int) -> bool:
 
 def execute_jal(cpu: CPU, rd: int, imm: int) -> bool:
     if rd == 0:
-        print32(f'j       {imm}')
+        print32(f'j       {cpu.pc + imm}')
     elif rd == 1:
-        print32(f'jal     {imm}')
+        print32(f'call    {cpu.pc + imm}')
     else:
-        print32(f'jal     {r[rd]}, {imm}')
+        print32(f'jal     {r[rd]}, {cpu.pc + imm}')
 
     cpu.set(rd, cpu.pc + 4)
     cpu.set_pc(cpu.pc + imm)
@@ -1175,10 +1948,10 @@ def execute_ecall(mem: AddressSpace, cpu: CPU) -> bool:
         if      cpu.get(11) >= mem.memory_start and cpu.get(11) + cpu.get(12) <= mem.memory_end or \
                 cpu.get(11) >= mem.stack_start  and cpu.get(11) + cpu.get(12) <= mem.stack_end:
             sys.stdout.flush()
-            res = sys.stdin.buffer.read(cpu.get(12))
-            for (i, b) in enumerate(res):
+            read_res = sys.stdin.buffer.read(cpu.get(12))
+            for (i, b) in enumerate(read_res):
                 mem.sb(cpu.get(11) + i, b)
-            cpu.set(10, len(res))
+            cpu.set(10, len(read_res))
             print(f'{"":52}{r[10]} <- {cpu.get(10)}')
             return True
         else:
@@ -1201,9 +1974,9 @@ def execute_ecall(mem: AddressSpace, cpu: CPU) -> bool:
             for i, addr in enumerate(range(cpu.get(11), cpu.get(11) + cpu.get(12))):
                 buf[i] = mem.lbu(addr)
             sys.stdout.flush()
-            res = sys.stdout.buffer.write(buf)
+            write_res = sys.stdout.buffer.write(buf)
             sys.stdout.flush()
-            cpu.set(10, res)
+            cpu.set(10, write_res)
             print(f'{"":52}{r[10]} <- {cpu.get(10)}')
             return True
         else:
@@ -1244,10 +2017,16 @@ def main() -> None:
     keep_going = True
     while keep_going:
         # fetch the next instruction
-        instruction = address_space.lw(cpu.pc)
+        inst = address_space.lw(cpu.pc)
+        instruction = decode(cpu.pc, inst)
+        print(f'{cpu.pc:6}: {inst&0xffffffff:08x}    ', end='')
+        s = ', '.join(instruction.operands)
+        print32(f'{instruction.mnemonic:<8}{s}')
+        instruction.execute(cpu, address_space)
+
 
         # execute
-        keep_going = execute(address_space, cpu, instruction)
+        #keep_going = execute(address_space, cpu, instruction)
 
         instruction_counter += 1
 
