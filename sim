@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
-from dataclasses import dataclass, field
+import argparse
+import dataclasses
+import re
 import sys
 import struct
 from typing import Callable, Optional, TypeAlias
@@ -273,7 +275,7 @@ class Machine:
         self.terminate = False
         return e
 
-@dataclass
+@dataclasses.dataclass
 class Instruction:
     address: int
     instruction: int
@@ -291,20 +293,20 @@ class Fault(Exception):
     def __init__(self, msg: str):
         self.msg = msg
 
-@dataclass
+@dataclasses.dataclass
 class MemoryValue:
     address: int
     value: bytes
     signed: bool
 
-@dataclass
+@dataclasses.dataclass
 class RegisterValue:
     register: int
     value: int
 
 Value: TypeAlias = MemoryValue | RegisterValue
 
-@dataclass
+@dataclasses.dataclass
 class Effects:
     # pc: old value, new value
     pc: tuple[int, int]
@@ -325,14 +327,15 @@ def roll_forward(m: Machine, e: Effects) -> None:
             case RegisterValue(rd, val):
                 m.set(rd, val)
             case MemoryValue(address, val, signed):
+                as_int = int.from_bytes(val, byteorder='little', signed=signed)
                 if len(val) == 1:
-                    m.sb(address, val)
+                    m.sb(address, as_int)
                 elif len(val) == 2:
-                    m.sh(address, val)
+                    m.sh(address, as_int)
                 elif len(val) == 4:
-                    m.sw(address, val)
+                    m.sw(address, as_int)
                 elif len(val) == 8:
-                    m.sd(address, val)
+                    m.sd(address, as_int)
                 else:
                     assert(False)
 
@@ -341,20 +344,23 @@ def report_effects(e: Effects) -> str:
     for elt in e.writes:
         match elt:
             case RegisterValue(rd, val):
-                parts.append(f'{r[rd]} <- {val}')
-            case MemoryValue(address, val, signed):
-                n = int.from_bytes(val, byteorder='little', signed=signed)
-                parts.append(f'({address}) <- {n}')
+                if r[rd] in ('ra', 'sp'):
+                    parts.append(f'{r[rd]} <- {hex(val)}')
+                else:
+                    parts.append(f'{r[rd]} <- {val}')
+            #case MemoryValue(address, val, signed):
+            #    n = int.from_bytes(val, byteorder='little', signed=signed)
+            #    parts.append(f'({address}) <- {n}')
     for elt in e.reads:
         match elt:
             case RegisterValue(rs, val):
                 pass
-            case MemoryValue(address, size, val):
-                parts.append(f'({address})')
+            #case MemoryValue(address, size, val):
+            #    parts.append(f'({address})')
     if e.pc[1] != e.pc[0] + 4:
-        parts.append(f'pc <- {e.pc[1]}')
-    if e.other_message is not None:
-        parts.append(e.other_message)
+        parts.append(f'pc <- {hex(e.pc[1])}')
+    #if e.other_message is not None:
+    #    parts.append(e.other_message)
     if len(parts) == 0:
         return '--'
     else:
@@ -1258,7 +1264,7 @@ def decode_ecall(address: int, inst: int) -> Instruction:
     def execute_ecall(m: Machine) -> None:
         if m.get(17) == 63:
             # read system call
-            m.other_message = f'read({m.get(10)}, {m.get(11)}, {m.get(12)})'
+            m.other_message = f'read({m.get(10)}, {hex(m.get(11))}, {m.get(12)})'
             if m.get(10) != 0:
                 raise Fault(f'Invalid file descriptor in read system call: {m.get(10)} but only 0 (stdin) is supported')
             if m.get(12) < 0:
@@ -1266,7 +1272,8 @@ def decode_ecall(address: int, inst: int) -> Instruction:
 
             if      m.get(11) >= m.memory_start and m.get(11) + m.get(12) <= m.memory_end or \
                     m.get(11) >= m.stack_start  and m.get(11) + m.get(12) <= m.stack_end:
-                read_res = sys.stdin.buffer.read(m.get(12))
+                read_res = sys.stdin.buffer.detach().read(m.get(12))
+                print(f'read: {read_res}')
                 for (i, b) in enumerate(read_res):
                     m.sb(m.get(11) + i, b)
                 m.set(10, len(read_res))
@@ -1280,7 +1287,7 @@ def decode_ecall(address: int, inst: int) -> Instruction:
 
         if m.get(17) == 64:
             # write system call
-            m.other_message = f'write({m.get(10)}, {m.get(11)}, {m.get(12)})'
+            m.other_message = f'write({m.get(10)}, {hex(m.get(11))}, {m.get(12)})'
             if m.get(10) != 1:
                 raise Fault(f'Invalid file descriptor in write system call: {m.get(10)} but only 1 (stdout) is supported')
             if m.get(12) < 0:
@@ -2147,23 +2154,152 @@ def execute_ecall(m: Machine) -> bool:
     sys.stdout.flush()
     return False
 
+def pseudo_instructions(text_start: int, text_end: int, instructions: dict[int, Instruction]) -> None:
+    for pc in range(text_start, text_end, 4):
+        instruction = instructions[pc]
+        match instruction:
+            case Instruction(mnemonic='jal', operands=(rd, _)):
+                assert(instruction.static_target is not None)
+                target = hex(instruction.static_target)
+                if rd == 'zero':
+                    instruction.mnemonic = 'j'
+                    instruction.operands = (target,)
+                elif rd == 'ra':
+                    instruction.mnemonic = 'call'
+                    instruction.operands = (target,)
+                else:
+                    instruction.operands = (rd, target)
+
+            case Instruction(mnemonic='jalr', operands=(rd, target)):
+                parts = re.match(r'(-?\d+)\((\w+)\)', target)
+                assert(parts is not None)
+                match (rd,) + parts.groups():
+                    case ('zero', '0', 'ra'):
+                        instruction.mnemonic = 'ret'
+                        instruction.operands = ()
+                    case ('zero', '0', rs1):
+                        instruction.mnemonic = 'jr'
+                        instruction.operands = (rs1,)
+                    case ('ra', '0', rs1):
+                        instruction.operands = (rs1,)
+                    case (rd, '0', rs1):
+                        instruction.operands = (rd, f'({rs1})')
+            
+            case Instruction(mnemonic='beq', operands=(rs1, rs2, _)):
+                assert(instruction.static_target is not None)
+                target = hex(instruction.static_target)
+                if rs1 == 'zero':
+                    instruction.mnemonic = 'beqz'
+                    instruction.operands = (rs2, target)
+                elif rs2 == 'zero':
+                    instruction.mnemonic = 'beqz'
+                    instruction.operands = (rs1, target)
+                else:
+                    instruction.operands = (rs1, rs2, target)
+            case Instruction(mnemonic='bne', operands=(rs1, rs2, _)):
+                assert(instruction.static_target is not None)
+                target = hex(instruction.static_target)
+                if rs1 == 'zero':
+                    instruction.mnemonic = 'bnez'
+                    instruction.operands = (rs2, target)
+                elif rs2 == 'zero':
+                    instruction.mnemonic = 'bnez'
+                    instruction.operands = (rs1, target)
+                else:
+                    instruction.operands = (rs1, rs2, target)
+            case Instruction(mnemonic='blt', operands=(rs1, rs2, _)):
+                assert(instruction.static_target is not None)
+                target = hex(instruction.static_target)
+                if rs1 == 'zero':
+                    instruction.mnemonic = 'bgtz'
+                    instruction.operands = (rs2, target)
+                elif rs2 == 'zero':
+                    instruction.mnemonic = 'bltz'
+                    instruction.operands = (rs1, target)
+                else:
+                    instruction.operands = (rs1, rs2, target)
+            case Instruction(mnemonic='bge', operands=(rs1, rs2, _)):
+                assert(instruction.static_target is not None)
+                target = hex(instruction.static_target)
+                if rs1 == 'zero':
+                    instruction.mnemonic = 'blez'
+                    instruction.operands = (rs2, target)
+                elif rs2 == 'zero':
+                    instruction.mnemonic = 'bgez'
+                    instruction.operands = (rs1, target)
+                else:
+                    instruction.operands = (rs1, rs2, target)
+            case Instruction(mnemonic='bltu', operands=(rs1, rs2, _)):
+                assert(instruction.static_target is not None)
+                instruction.operands = (rs1, rs2, hex(instruction.static_target))
+            case Instruction(mnemonic='bgeu', operands=(rs1, rs2, _)):
+                assert(instruction.static_target is not None)
+                instruction.operands = (rs1, rs2, hex(instruction.static_target))
+
+            case Instruction(mnemonic='lb' | 'lh' | 'lw' | 'ld' | 'lbu' | 'lhu' | 'lwu' | 'sb' | 'sh' | 'sw' | 'sd', operands=(rd, source)):
+                parts = re.match(r'(-?\d+)\((\w+)\)', source)
+                assert(parts is not None)
+                match parts.groups():
+                    case ('0', rs1):
+                        instruction.operands = (rd, f'({rs1})')
+
+            case Instruction(mnemonic='addi', operands=('zero', 'zero', '0')):
+                instruction.mnemonic = 'nop'
+                instruction.operands = ()
+            case Instruction(mnemonic='addi', operands=(rd, 'zero', imm)):
+                instruction.mnemonic = 'li'
+                instruction.operands = (rd, imm)
+            case Instruction(mnemonic='addi', operands=(rd, rs1, '0')):
+                instruction.mnemonic = 'mv'
+                instruction.operands = (rd, rs1)
+
+            case Instruction(mnemonic='sltiu', operands=(rd, rs1, '1')):
+                instruction.mnemonic = 'seqz'
+                instruction.operands = (rd, rs1)
+
+            case Instruction(mnemonic='xori', operands=(rd, rs1, '-1')):
+                instruction.mnemonic = 'not'
+                instruction.operands = (rd, rs1)
+
+            case Instruction(mnemonic='addiw', operands=('zero', 'zero', '0')):
+                instruction.mnemonic = 'nop'
+                instruction.operands = ()
+            case Instruction(mnemonic='addiw', operands=(rd, 'zero', imm)):
+                instruction.mnemonic = 'li'
+                instruction.operands = (rd, imm)
+
+            case Instruction(mnemonic='sub', operands=(rd, 'zero', rs2)):
+                instruction.mnemonic = 'neg'
+                instruction.operands = (rd, rs2)
+
+            case Instruction(mnemonic='slt', operands=(rd, rs1, 'zero')):
+                instruction.mnemonic = 'sltz'
+                instruction.operands = (rd, rs1)
+            case Instruction(mnemonic='slt', operands=(rd, 'zero', rs2)):
+                instruction.mnemonic = 'sgtz'
+                instruction.operands = (rd, rs2)
+
+            case Instruction(mnemonic='sltu', operands=(rd, 'zero', rs2)):
+                instruction.mnemonic = 'snez'
+                instruction.operands = (rd, rs2)
+
 def main() -> None:
-    # default to 'a.out' as the executable file,
-    # or let the user specify a name on the command line
-    if len(sys.argv) == 1:
-        filename = 'a.out'
-    elif len(sys.argv) == 2:
-        filename = sys.argv[1]
-    else:
-        print(f'Usage: {sys.argv[0]} <filename>', file=sys.stderr)
-        sys.exit(1)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-m', '--mode',
+        choices=['run', 'trace', 'dasm'],
+        default='trace')
+    parser.add_argument('-e', '--executable',
+        default='a.out')
+    parser.add_argument('-p', '--pseudo', type=bool,
+        default=True)
+    args = parser.parse_args()
 
     # load the program from disk and form the
     # simulated address space and cpu
-    m = load_elf(filename)
+    m = load_elf(args.executable)
 
     # disassemble the entire text segment
-    text = {}
+    instructions = {}
     for pc in range(m.text_start, m.text_end, 4):
         inst = m.load_instruction(pc)
         #print(f'{pc:6}: {inst&0xffffffff:08x}    ', end='')
@@ -2172,35 +2308,56 @@ def main() -> None:
         #print32(f'{instruction.mnemonic:<8}{s}')
         #print()
 
-        text[pc] = instruction
+        instructions[pc] = instruction
 
-    # main loop
+    if args.pseudo:
+        pseudo_instructions(m.text_start, m.text_end, instructions)
+
+    # trace the entire execution
+    print_output = args.mode == 'run'
     sequence = []
     while True:
         # fetch the next instruction
-        instruction = text[m.pc]
+        instruction = instructions[m.pc]
         try:
             instruction.execute(m)
-        except Fault as e:
-            m.other_message = e.msg
+        except Fault as err:
+            m.other_message = err.msg
             m.terminate = True
         e = m.gather_effects()
         sequence.append( (instruction, e) )
+        if print_output and e.stdout is not None:
+            sys.stdout.buffer.write(e.stdout)
+            sys.stdout.flush()
         if e.terminate:
             break
 
-    for (instruction, effects) in sequence:
-        disasm = f'{instruction.mnemonic:<8}' + ', '.join(instruction.operands)
-        changed = report_effects(effects)
-        line = f'{instruction.address:6}: {instruction.instruction&0xffffffff:08x}    {disasm:<32}{changed}'
-        print(line)
+    match args.mode:
+        case 'dasm':
+            for pc in range(m.text_start, m.text_end, 4):
+                instruction = instructions[pc]
+                disasm = f'{instruction.mnemonic:<8}' + ', '.join(instruction.operands)
+                line = f'{hex(instruction.address)[2:]:>06}: {instruction.instruction&0xffffffff:08x}    {disasm:<32}'
+                print(line)
 
-    if len(m.stdin) > 0:
-        #print('stdin:')
-        #print(m.stdin.decode())
-        pass
+        case 'trace':
+            for (instruction, effects) in sequence:
+                disasm = f'{instruction.mnemonic:<8}' + ', '.join(instruction.operands)
+                changed = report_effects(effects)
+                line = f'{hex(instruction.address)[2:]:>06}: {instruction.instruction&0xffffffff:08x}    {disasm:<32}{changed}'
+                print(line)
+                if effects.other_message is not None:
+                    print(f'{"":20}{effects.other_message}')
+                if effects.stdin is not None:
+                    print(f'{"":20}{repr(effects.stdin.decode())}')
+                if effects.stdout is not None:
+                    print(f'{"":20}{repr(effects.stdout.decode())}')
 
-    if len(m.stdout) > 0:
-        print(m.stdout.decode(), end='')
+        case 'run':
+            # should have ended with exit(0)
+            (instruction, effects) = sequence[-1]
+            if instruction.mnemonic != 'ecall' or effects.other_message != 'exit(0)':
+                print(effects.other_message, file=sys.stderr)
+                sys.exit(1)
 
 main()
