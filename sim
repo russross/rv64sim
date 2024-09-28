@@ -2,6 +2,7 @@
 
 import argparse
 import ctypes
+import curses
 import dataclasses
 import re
 import sys
@@ -1536,7 +1537,7 @@ def add_labels(m: Machine, instructions: dict[int, Instruction]) -> None:
             elif addr > pc:
                 instruction.fields[-1] = f'{target_label}f'
 
-def pre_trace(m: Machine, instructions: dict[int, Instruction]) -> list[tuple[Instruction, Effects]]:
+def pre_trace(m: Machine, instructions: dict[int, Instruction], echo: bool=False) -> list[tuple[Instruction, Effects]]:
     sequence = []
     while True:
         # fetch the next instruction
@@ -1548,6 +1549,9 @@ def pre_trace(m: Machine, instructions: dict[int, Instruction]) -> list[tuple[In
             m.terminate = True
         e = m.gather_effects()
         sequence.append( (instruction, e) )
+        if echo and e.stdout is not None:
+            sys.stdout.buffer.write(e.stdout)
+            sys.stdout.flush()
         if e.terminate:
             break
 
@@ -1557,10 +1561,204 @@ def pre_trace(m: Machine, instructions: dict[int, Instruction]) -> list[tuple[In
 
     return sequence
 
+def find_function_bounds(m: Machine, pc: int) -> tuple[int, int]:
+    assert(pc >= m.text_start and pc < m.text_end and pc%4 == 0)
+    for start in range(pc, m.text_start-4, -4):
+        if start in m.text_symbols:
+            break
+    for end in range(pc+4, m.text_end, 4):
+        if end in m.text_symbols:
+            break
+    return (start, end)
+
+def render_line(instruction: Instruction, effects: Optional[Effects]) -> list[str]:
+    disasm = f'{instruction.fields[0]:<8}' + ', '.join(instruction.fields[1:])
+    if instruction.label is None:
+        addr_part = ''
+    else:
+        addr_part = instruction.label + ':'
+    result = [f'{addr_part:<20}{disasm:<48}']
+    if effects is None:
+        return result
+
+    result[0] += report_effects(effects)
+
+    if effects.other_message is not None:
+        result.append(f'{"":20}{effects.other_message}')
+    if effects.stdin is not None:
+        result.append(f'{"":20}{repr(effects.stdin.decode())}')
+    if effects.stdout is not None:
+        result.append(f'{"":20}{repr(effects.stdout.decode())}')
+
+    return result
+
+def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[Instruction, Effects]]) -> None:
+    # take over terminal
+    stdscr = curses.initscr()
+    curses.noecho()
+    curses.cbreak()
+    stdscr.keypad(True)
+    stdscr.clear()
+    curses.curs_set(0)
+    curses.start_color()
+
+    # colors:
+    # 0 = normal line (white on black, built-in)
+    # 1 = current pc
+    curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_GREEN)
+    # 2 = cursor (if != pc)
+    curses.init_pair(2, curses.COLOR_BLACK, curses.COLOR_WHITE)
+
+    # handle screen resizes
+    source_view: Optional[curses.window] = None
+    (source_height, source_width) = (0, 0)
+    active = True
+    def resize() -> None:
+        nonlocal source_view, source_height, source_width, active
+        (height, width) = stdscr.getmaxyx()
+        source_height = height
+        source_width = width
+        if source_height < 3 or source_width < 5:
+            active = False
+            return
+        active = True
+        if source_view is None:
+            source_view = curses.newwin(source_height, source_width, 0, 0)
+        else:
+            source_view.resize(source_height, source_width)
+    resize()
+
+    seq_i = 0
+    cursor_addr = sequence[seq_i][0].address
+    pc = cursor_addr
+
+    def draw_source() -> None:
+        nonlocal source_view, source_height, source_width, active, seq_i, cursor_addr, pc
+        if not active: return
+        source_view.erase()
+        source_view.box()
+        middle = (source_height-2) // 2
+        for i in range(source_height-2):
+            addr = cursor_addr - middle*4 + i*4
+            if addr == pc:
+                (instruction, effects) = sequence[seq_i]
+                lines = render_line(instruction, effects)
+                color = curses.color_pair(1)
+            elif addr in instructions:
+                instruction = instructions[addr]
+                lines = render_line(instruction, None)
+                if addr == cursor_addr:
+                    color = curses.color_pair(2)
+                else:
+                    color = curses.color_pair(0)
+            else:
+                lines = ['']
+                color = curses.color_pair(0)
+            source_view.addstr(i+1, 1, lines[0][:source_width-2].ljust(source_width-2), color)
+        status_line = f' {seq_i+1}/{len(sequence)} PC: {hex(pc)} '[:source_width-4]
+        source_view.addstr(source_height-1, 3, status_line)
+        source_view.noutrefresh()
+        curses.doupdate()
+
+    draw_source()
+    stdscr.noutrefresh()
+
+    while True:
+        key = stdscr.getch()
+        if key == curses.KEY_RIGHT and seq_i+1 < len(sequence):
+            apply(m, sequence[seq_i][1], True)
+            seq_i += 1
+            pc = sequence[seq_i][0].address
+            cursor_addr = pc
+            draw_source()
+        elif key == curses.KEY_LEFT and seq_i > 0:
+            apply(m, sequence[seq_i][1], False)
+            seq_i -= 1
+            pc = sequence[seq_i][0].address
+            cursor_addr = pc
+            draw_source()
+        elif key == curses.KEY_UP and cursor_addr-4 >= m.text_start:
+            cursor_addr -= 4
+            draw_source()
+        elif key == curses.KEY_DOWN and cursor_addr+4 < m.text_end:
+            cursor_addr += 4
+            draw_source()
+        elif key == curses.KEY_PPAGE and cursor_addr-4 >= m.text_start:
+            cursor_addr -= 4*(source_height - 2)
+            if cursor_addr < m.text_start:
+                cursor_addr = m.text_start
+            draw_source()
+        elif key == curses.KEY_NPAGE and cursor_addr+4 >= m.text_start:
+            cursor_addr += 4*(source_height - 2)
+            if cursor_addr >= m.text_end:
+                cursor_addr = m.text_end-4
+            draw_source()
+        elif key in (curses.KEY_ENTER, ord('\n')):
+            # find the next time the pc reaches this address
+            for peek in range(seq_i+1, len(sequence)):
+                if sequence[peek][0].address == cursor_addr:
+                    # play the sequence forward to this point
+                    for seq_i in range(seq_i, peek+1):
+                        apply(m, sequence[seq_i][1], True)
+                    pc = sequence[seq_i][0].address
+                    cursor_addr = pc
+                    draw_source()
+                    break
+        elif key in (curses.KEY_BACKSPACE , ord('\b'), ord('\x7f')):
+            # find the previous time the pc was at this address
+            for peek in range(seq_i-1, -1, -1):
+                if sequence[peek][0].address == cursor_addr:
+                    # play the sequence backward to this point
+                    for seq_i in range(seq_i-1, peek-1, -1):
+                        apply(m, sequence[seq_i][1], False)
+                    pc = sequence[seq_i][0].address
+                    cursor_addr = pc
+                    draw_source()
+                    break
+        elif key == curses.KEY_HOME:
+            # jump back to when current function was called
+            (func_start, func_end) = find_function_bounds(m, pc)
+
+            first = True
+            for seq_i in range(seq_i, -1, -1):
+                pc = sequence[seq_i][0].address
+                cursor_addr = pc
+                if first:
+                    first = False
+                else:
+                    apply(m, sequence[seq_i][1], False)
+                if func_start <= pc < func_end and (seq_i == 0 or sequence[seq_i-1][0].fields[0] == 'call'):
+                    break
+            draw_source()
+        elif key == curses.KEY_END:
+            # find the next return (or end of program) from current function
+            (func_start, func_end) = find_function_bounds(m, pc)
+            for seq_i in range(seq_i, len(sequence)):
+                pc = sequence[seq_i][0].address
+                cursor_addr = pc
+                if func_start <= pc < func_end and sequence[seq_i][0].fields[0] == 'ret':
+                    break
+                apply(m, sequence[seq_i][1], True)
+            draw_source()
+
+        elif key == curses.KEY_RESIZE:
+            resize()
+            draw_source()
+            draw_source()
+
+        elif key == ord('q'):
+            break
+
+    # restore terminal
+    curses.nocbreak()
+    stdscr.keypad(False)
+    curses.echo()
+    curses.endwin()
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('-m', '--mode',
-        choices=['run', 'trace', 'dasm'],
+        choices=['run', 'trace', 'dasm', 'step'],
         default='trace')
     parser.add_argument('-e', '--executable',
         default='a.out')
@@ -1593,32 +1791,17 @@ def main() -> None:
         return
 
     # trace the entire execution
-    sequence = pre_trace(m, instructions)
-
-    # just dump the output?
-    # TODO: reads and writes will not be correctly interleaved
-    if args.mode == 'run':
-        for (instruction, e) in sequence:
-            if e.stdout is not None:
-                sys.stdout.buffer.write(e.stdout)
-                sys.stdout.flush()
+    # for run mode, haev pre_trace echo output as it goes
+    # so inputs and outputs are correctly interleved
+    sequence = pre_trace(m, instructions, args.mode=='run')
 
     if args.mode == 'trace':
         for (instruction, effects) in sequence:
-            disasm = f'{instruction.fields[0]:<8}' + ', '.join(instruction.fields[1:])
-            changed = report_effects(effects)
-            if instruction.label is None:
-                addr_part = ''
-            else:
-                addr_part = instruction.label + ':'
-            line = f'{addr_part:<20}{disasm:<48}{changed}'
-            print(line)
-            if effects.other_message is not None:
-                print(f'{"":20}{effects.other_message}')
-            if effects.stdin is not None:
-                print(f'{"":20}{repr(effects.stdin.decode())}')
-            if effects.stdout is not None:
-                print(f'{"":20}{repr(effects.stdout.decode())}')
+            for line in render_line(instruction, effects):
+                print(line)
+
+    if args.mode == 'step':
+        ui(m, instructions, sequence)
 
     # should have ended with exit(0)
     (instruction, effects) = sequence[-1]
