@@ -4,6 +4,7 @@ import argparse
 import ctypes
 import curses
 import dataclasses
+import itertools
 import re
 import sys
 import struct
@@ -391,7 +392,7 @@ def apply(m: Machine, e: Effects, is_forward: bool) -> None:
 
 def set_most_recent_memory(m: Machine, sequence: list[tuple[Instruction, Effects]], seq_i: int) -> None:
     m.most_recent_memory = m.data_start if m.data_start > 0 else m.stack_end-8
-    for seq_i in range(seq_i-1, -1, -1):
+    for seq_i in range(seq_i, -1, -1):
         (instruction, e) = sequence[seq_i]
         for r in e.reads:
             match r:
@@ -1641,13 +1642,33 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
     stdscr.clear()
     curses.curs_set(0)
     curses.start_color()
+    curses.use_default_colors()
+    if curses.COLORS < 256:
+        print('This must be run in a terminal with support for at least 256 colors')
+        sys.exit(1)
 
     # colors:
     # 0 = normal line (white on black, built-in)
     # 1 = current pc
-    curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_GREEN)
+    curses.init_pair(1, curses.COLOR_BLACK, 71)
     # 2 = cursor (if != pc)
-    curses.init_pair(2, curses.COLOR_BLACK, curses.COLOR_WHITE)
+    curses.init_pair(2, curses.COLOR_BLACK, 102)
+    # 3 = current memory address
+    curses.init_pair(3, curses.COLOR_WHITE, 17)
+    # 10-16: memory, with pastel foreground colors
+    curses.init_pair(10, 102, 16)
+    curses.init_pair(11, 138, 16)
+    curses.init_pair(12, 144, 16)
+    curses.init_pair(13, 108, 16)
+    curses.init_pair(14, 109, 16)
+    curses.init_pair(15, 103, 16)
+    curses.init_pair(16, 139, 16)
+    data_color_pairs = [10, 11, 12, 13, 14, 15, 16]
+    data_colors = list(zip(sorted(m.data_symbols.keys()), itertools.cycle(data_color_pairs)))
+
+    # just in case there is no data segment
+    if len(data_colors) == 0:
+        data_colors.append((0, 0))
 
     # handle screen resizes
     (size_y, size_x) = (0, 0)
@@ -1659,6 +1680,24 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
             active = False
             return
         active = True
+
+    def addcolorstr(y: int, x: int, line: str, width: int) -> None:
+        nonlocal stdscr
+        i = 0
+        color = 0
+        while len(line) > 0 and i < width:
+            if ord(line[0]) == 27:
+                # escape followed by 2-digit decimal color pair number
+                color = int(line[1:3])
+                line = line[3:]
+                continue
+            j = 0
+            while j < len(line) and i+j < width and ord(line[j]) != 27:
+                j += 1
+            chunk = line[:j]
+            line = line[j:]
+            stdscr.addstr(y, x+i, chunk, curses.color_pair(color))
+            i += j
 
     (src_y, src_x) = (0, 0)
     def draw() -> None:
@@ -1682,7 +1721,7 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
             src_y -= out_y+1
             reg_top -= out_y+1
             out_top = reg_top + reg_y + 1
-        status_line = ' Source '[:src_x-2]
+        status_line = ' Text '[:src_x-2]
         stdscr.addstr(src_top-1, 2, status_line)
 
         middle = src_y // 2
@@ -1713,40 +1752,59 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
             lines = []
             center_line = 0
             if m.most_recent_memory >= m.stack_start:
-                status_line = ' Stack memory '[:mem_x-2]
+                status_line = ' Stack '[:mem_x-2]
             elif m.data_start <= m.most_recent_memory < m.data_end:
-                status_line = ' Data memory '[:mem_x-2]
+                status_line = ' Data '[:mem_x-2]
             else:
                 status_line = ' Unknown memory '[:mem_x-2]
 
             stdscr.addstr(0, mem_left+1, status_line)
 
             middle = mem_y // 2
+            current_region = len(data_colors) - 1
             for i in range(mem_y):
                 addr = (m.most_recent_memory & ~7) + middle*8 - i*8
-                (hex_s, ascii_s) = ('', '')
-                show_addr = False
+                while current_region > 0 and data_colors[current_region][0] > addr:
+                    current_region -= 1
+                (addr_s, hex_s, ascii_s) = (f'{"":7}', '', '')
+                color = 0
                 for j in range(addr, addr+8):
                     if j >= m.data_start and j < m.data_end or j >= m.stack_start and j < m.stack_start+4096:
-                        show_addr = True
+                        if i == middle:
+                            addr_s = f'\03301{addr:06x}\03300:'
+                        else:
+                            addr_s = f'{addr:06x}:'
+
+                        # did we just hit a label?
+                        if current_region+1 < len(data_colors) and data_colors[current_region+1][0] == j:
+                            current_region += 1
+                        if color != data_colors[current_region][1]:
+                            if color != 0:
+                                hex_s += '\03300'
+                            color = data_colors[current_region][1]
+                            hex_s += f' \033{color:02}'
+                            ascii_s += f'\033{color:02}'
+                        elif j > addr:
+                            hex_s += ' '
                         n = m.get_byte(j)
-                        hex_s += f'{n:02x} '
+                        hex_s += f'{n:02x}'
                         if n >= ord(' ') and n <= ord('~'):
                             ascii_s += chr(n)
                         else:
                             ascii_s += '·'
                     else:
+                        if color != 0:
+                            color = 0
+                            hex_s += '\03300'
+                            ascii_s += '\03300'
                         hex_s += '   '
                         ascii_s += ' '
-                if show_addr:
-                    line = f'{addr:06x}: {hex_s}{ascii_s}'[:mem_x]
-                else:
-                    line = f'        {hex_s}{ascii_s}'[:mem_x]
-                if i == middle:
-                    color = curses.color_pair(2)
-                else:
-                    color = curses.color_pair(0)
-                stdscr.addstr(1+i, mem_left, line, color)
+                if color != 0:
+                    hex_s += '\03300'
+                    ascii_s += '\03300'
+
+                stdscr.addstr(1+i, mem_left, addr_s, color)
+                addcolorstr(1+i, mem_left, f'{addr_s}{hex_s} {ascii_s}', mem_x)
 
         # register view
         if reg_top >= 0:
@@ -1892,7 +1950,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('-m', '--mode',
         choices=['run', 'trace', 'dasm', 'debug'],
-        default='trace')
+        default='debug')
     parser.add_argument('-e', '--executable',
         default='a.out')
     args = parser.parse_args()
