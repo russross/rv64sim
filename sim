@@ -5,6 +5,7 @@ import ctypes
 import curses
 import dataclasses
 import itertools
+import os
 import re
 import sys
 import struct
@@ -37,6 +38,7 @@ class Machine:
         self.global_pointer = global_pointer
         self.stdout = bytearray()
         self.stdin = bytearray()
+        self.stack_frames: list[int] = []
 
         # allocate a stack with a guard page
         self.stack = bytearray(4096)
@@ -59,7 +61,11 @@ class Machine:
         self.stdout_delta: Optional[bytes] = None
         self.other_message: Optional[str] = None
         self.terminate = False
-        self.most_recent_memory = data_start
+        self.most_recent_memory = data_start if data_start > 0 else self.stack_end - 8
+        self.most_recent_data = (data_start, 0)
+        self.most_recent_stack = (self.stack_end, 0)
+        self.function_start: Optional[int] = None
+        self.function_end: Optional[int] = None
 
     def get_byte(self, addr: int) -> int:
         if      not (addr >= self.memory_start and addr < self.memory_end) and \
@@ -71,6 +77,18 @@ class Machine:
             raw = self.stack[addr - self.stack_start: addr+1 - self.stack_start]
 
         return int.from_bytes(raw, byteorder='little', signed=False)
+
+    def load(self, addr: int, size: int) -> bytes:
+        if      not (addr >= self.memory_start and addr+size <= self.memory_end) and \
+                not (addr >= self.stack_start  and addr+size <= self.stack_end):
+            raise Fault(f'Segmentation fault in load: address is {addr}, size is {size}')
+        if addr < self.memory_end:
+            raw = self.memory[addr - self.memory_start: addr+size - self.memory_start]
+        else:
+            raw = self.stack[addr - self.stack_start: addr+size - self.stack_start]
+
+        self.reads.append(MemoryValue(addr, raw, False))
+        return raw
 
     def lb(self, addr: int) -> int:
         if      not (addr >= self.memory_start and addr < self.memory_end) and \
@@ -172,6 +190,22 @@ class Machine:
         self.reads.append(MemoryValue(addr, raw, False))
         return int.from_bytes(raw, byteorder='little', signed=False)
 
+    def store(self, addr: int, raw: bytes) -> None:
+        size = len(raw)
+        if      not (addr >= self.memory_start and addr+size <= self.memory_end) and \
+                not (addr >= self.stack_start  and addr+size <= self.stack_end):
+            raise Fault(f'Segmentation fault in sb: address is {addr}')
+
+        if addr < self.memory_end:
+            old = self.memory[addr - self.memory_start: addr+size - self.memory_start]
+            self.memory[addr - self.memory_start: addr+size - self.memory_start] = raw
+        else:
+            old = self.stack[addr - self.stack_start: addr+size - self.stack_start]
+            self.stack[addr - self.stack_start: addr+size - self.stack_start] = raw
+
+        self.writes.append(MemoryValue(addr, raw, True))
+        self.undos.append(MemoryValue(addr, old, True))
+
     def sb(self, addr: int, value: int) -> None:
         if      not (addr >= self.memory_start and addr < self.memory_end) and \
                 not (addr >= self.stack_start  and addr < self.stack_end):
@@ -261,7 +295,13 @@ class Machine:
 
     def get(self, reg: int) -> int:
         if reg != 0:
-            self.reads.append(RegisterValue(reg, self.x[reg]))
+            dup = False
+            for elt in self.reads:
+                match elt:
+                    case RegisterValue(rs, _) if rs == reg:
+                        dup = True
+            if not dup:
+                self.reads.append(RegisterValue(reg, self.x[reg]))
         return self.x[reg]
 
     def set(self, reg: int, value: int) -> None:
@@ -284,11 +324,22 @@ class Machine:
         if self.pc & 3 != 0:
             raise Fault(f'Bus error: pc is {self.pc}')
 
+    def mark_function_start(self) -> None:
+        sp = self.get(r.index('sp'))
+        self.function_start = sp
+        self.stack_frames.append(sp)
+
+    def mark_function_end(self) -> None:
+        sp = self.get(r.index('sp'))
+        self.function_end = sp
+        self.stack_frames.pop()
+
     def gather_effects(self) -> 'Effects':
         e = Effects((self.old_pc, self.pc),
             self.reads, self.writes, self.undos,
             self.stdin_delta, self.stdout_delta,
-            self.other_message, self.terminate)
+            self.other_message, self.terminate,
+            self.function_start, self.function_end)
         self.reads = []
         self.writes = []
         self.undos = []
@@ -296,6 +347,9 @@ class Machine:
         self.stdout_delta = None
         self.other_message = None
         self.terminate = False
+        self.stack_frame = None
+        self.function_start = None
+        self.function_end = None
         return e
 
     def text_label(self, addr: int, pc: int = 0) -> str:
@@ -336,6 +390,7 @@ class Instruction:
     fallthrough: bool = True
     label: Optional[str] = None
     is_target: bool = False
+    arrows: Optional[list[tuple[bool, bool, int]]] = None
 
 class Fault(Exception):
     def __init__(self, msg: str):
@@ -365,6 +420,8 @@ class Effects:
     stdout: Optional[bytes]
     other_message: Optional[str]
     terminate: bool
+    function_start: Optional[int] # sp at call time
+    function_end: Optional[int] # sp at ret time
 
 def apply(m: Machine, e: Effects, is_forward: bool) -> None:
     m.set_pc(e.pc[0 if is_forward else 1])
@@ -373,37 +430,51 @@ def apply(m: Machine, e: Effects, is_forward: bool) -> None:
             case RegisterValue(rd, val):
                 m.set(rd, val)
             case MemoryValue(address, val, signed):
-                as_int = int.from_bytes(val, byteorder='little', signed=signed)
-                if len(val) == 1:
-                    m.sb(address, as_int)
-                elif len(val) == 2:
-                    m.sh(address, as_int)
-                elif len(val) == 4:
-                    m.sw(address, as_int)
-                elif len(val) == 8:
-                    m.sd(address, as_int)
-                else:
-                    assert(False)
+                m.store(address, val)
     if e.stdout is not None:
         if is_forward:
             m.stdout += e.stdout
         else:
             m.stdout = m.stdout[:-len(e.stdout)]
+    if e.stdin is not None:
+        # echo input
+        if is_forward:
+            m.stdout += e.stdin
+        else:
+            m.stdout = m.stdout[:-len(e.stdin)]
+    if e.function_start is not None:
+        if is_forward:
+            m.stack_frames.append(e.function_start)
+        else:
+            m.stack_frames.pop()
+    if e.function_end is not None:
+        if is_forward:
+            m.stack_frames.pop()
+        else:
+            m.stack_frames.append(e.function_end)
 
 def set_most_recent_memory(m: Machine, sequence: list[tuple[Instruction, Effects]], seq_i: int) -> None:
     m.most_recent_memory = m.data_start if m.data_start > 0 else m.stack_end-8
+    m.most_recent_data = (m.data_start, 0)
+    m.most_recent_stack = (m.stack_end-8, 0)
+    (stack, data) = (False, False)
     for seq_i in range(seq_i, -1, -1):
         (instruction, e) = sequence[seq_i]
-        for r in e.reads:
-            match r:
-                case MemoryValue(address, _, _):
-                    m.most_recent_memory = address
-                    return
-        for w in e.writes:
-            match w:
-                case MemoryValue(address, _, _):
-                    m.most_recent_memory = address
-                    return
+        for elt in itertools.chain(e.reads, e.writes):
+            match elt:
+                case MemoryValue(address, value, _):
+                    if not stack and address >= m.stack_start:
+                        m.most_recent_stack = (address, len(value))
+                        if not data:
+                            m.most_recent_memory = address
+                        stack = True
+                    if not data and address < m.data_end:
+                        m.most_recent_data = (address, len(value))
+                        if not stack:
+                            m.most_recent_memory = address
+                        data = True
+                    if stack and data:
+                        break
 
 def report_effects(e: Effects) -> str:
     parts = []
@@ -743,8 +814,6 @@ def decode(labels: Machine, address: int, inst: int) -> Instruction:
         case 0x73:
             if inst == 0x00000073:
                 return decode_ecall(address, inst)
-
-                # TODO: if ecall was an exit syscall we quit gracefully
             elif inst == 0x00100073:
                 # handle ebreak here--exit
                 def execute_ebreak(m: Machine) -> None:
@@ -774,6 +843,8 @@ def decode_jal(labels: Machine, address: int, inst: int, rd: int, imm: int) -> I
     def execute_jal(m: Machine) -> None:
         m.set(rd, m.pc + 4)
         m.set_pc(m.pc + imm)
+        if r[rd] == 'ra':
+            m.mark_function_start()
 
     dest = labels.text_label(address+imm)
     if r[rd] == 'zero':
@@ -794,6 +865,10 @@ def decode_jalr(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
         rs1_val = m.get(rs1)
         m.set(rd, m.pc + 4)
         m.set_pc((rs1_val + imm) & ~1)
+        if r[rd] == 'ra':
+            m.mark_function_start()
+        if r[rd] == 'zero' and imm == 0 and r[rs1] == 'ra':
+            m.mark_function_end()
 
     match (r[rd], imm, r[rs1]):
         case ('zero', 0, 'ra'):
@@ -1441,8 +1516,7 @@ def decode_ecall(address: int, inst: int) -> Instruction:
             if      m.get(11) >= m.memory_start and m.get(11) + m.get(12) <= m.memory_end or \
                     m.get(11) >= m.stack_start  and m.get(11) + m.get(12) <= m.stack_end:
                 read_res = sys.stdin.buffer.read(m.get(12))
-                for (i, b) in enumerate(read_res):
-                    m.sb(m.get(11) + i, b)
+                m.store(m.get(11), read_res)
                 m.set(10, len(read_res))
                 m.stdin_delta = read_res
                 m.stdin += read_res
@@ -1461,11 +1535,9 @@ def decode_ecall(address: int, inst: int) -> Instruction:
 
             if      m.get(11) >= m.memory_start and m.get(11) + m.get(12) <= m.memory_end or \
                     m.get(11) >= m.stack_start  and m.get(11) + m.get(12) <= m.stack_end:
-                buf = bytearray(m.get(12))
-                for i, addr in enumerate(range(m.get(11), m.get(11) + m.get(12))):
-                    buf[i] = m.lbu(addr)
+                buf = m.load(m.get(11), m.get(12))
                 m.set(10, len(buf))
-                m.stdout_delta = bytes(buf)
+                m.stdout_delta = buf
                 m.stdout += buf
                 m.set_pc(m.pc + 4)
                 return
@@ -1526,6 +1598,7 @@ def add_labels(m: Machine, instructions: dict[int, Instruction]) -> None:
         next_fn[prev] = m.text_end
 
     # update branches to reference local labels
+    branches = []
     fn_start = 0
     for pc in range(m.text_start, m.text_end, 4):
         instruction = instructions[pc]
@@ -1577,7 +1650,16 @@ def add_labels(m: Machine, instructions: dict[int, Instruction]) -> None:
             elif addr > pc:
                 instruction.fields[-1] = f'{target_label}f'
 
-def pre_trace(m: Machine, instructions: dict[int, Instruction], echo: bool=False) -> list[tuple[Instruction, Effects]]:
+        # record this for arrow drawing
+        branches.append( (abs(addr - pc), instruction.address) )
+
+    # draw branch arrows
+    branches.sort()
+    for (_, pc) in branches:
+        instruction = instructions[pc]
+        # TODO
+
+def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, echo_in: bool) -> list[tuple[Instruction, Effects]]:
     sequence = []
     while True:
         # fetch the next instruction
@@ -1589,8 +1671,11 @@ def pre_trace(m: Machine, instructions: dict[int, Instruction], echo: bool=False
             m.terminate = True
         e = m.gather_effects()
         sequence.append( (instruction, e) )
-        if echo and e.stdout is not None:
+        if echo_out and e.stdout is not None:
             sys.stdout.buffer.write(e.stdout)
+            sys.stdout.flush()
+        if echo_in and e.stdin is not None and not sys.stdin.isatty():
+            sys.stdout.buffer.write(e.stdin)
             sys.stdout.flush()
         if e.terminate:
             break
@@ -1634,6 +1719,12 @@ def render_line(instruction: Instruction, effects: Optional[Effects]) -> list[st
     return result
 
 def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[Instruction, Effects]]) -> None:
+    # make sure stdin is connected to the tty
+    if not sys.stdin.isatty():
+        sys.stdin.close()
+        os.close(0)
+        sys.stdin = open('CON' if os.name == 'nt' else '/dev/tty', 'r')
+
     # take over terminal
     stdscr = curses.initscr()
     curses.noecho()
@@ -1700,30 +1791,51 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
             i += j
 
     (src_y, src_x) = (0, 0)
+    seq_i = 0
+    cursor_addr = sequence[seq_i][0].address
+    pc = cursor_addr
     def draw() -> None:
-        nonlocal stdscr, size_y, size_x, src_y, src_x, seq_i, cursor_addr, pc, m
+        nonlocal stdscr, size_y, size_x, src_y, src_x, seq_i, cursor_addr, pc, m, data_colors
         if not active: return
         stdscr.erase()
         stdscr.box()
 
         # source view
         (src_top, src_y, src_x) = (1, size_y-2, size_x-2)
-        (mem_left, mem_y, mem_x) = (-1, size_y-2, 40)
+
+        # wide enough for memory view?
+        (stack_left, stack_top, stack_y, stack_x) = (-1, 1, size_y-2, 40)
+        (data_left, data_top, data_y, data_x) = (-1, 1, size_y-2, 40)
         if src_x >= 80:
-            src_x -= mem_x+1
-            mem_left = src_x+2
+            src_x -= data_x+1
+
+            # stack, data, or both?
+            if size_y >= 20:
+                stack_left = src_x+2
+                stack_y = (size_y - 3) // 3
+                data_left = src_x+2
+                data_top = stack_top + stack_y + 1
+                data_y = size_y - stack_y - 3
+            elif m.most_recent_memory >= m.stack_start:
+                stack_left = src_x+2
+            else:
+                data_left = src_x+2
+
+        # tall enough for register view?
         (reg_top, reg_y, reg_x) = (-1, 4, src_x)
-        (out_top, out_y, out_x) = (-1, 4, src_x)
         if src_y - (reg_y+1) >= 3:
             src_y -= reg_y+1
             reg_top = src_top + src_y + 1
+
+        # tall enough for output view?
+        (out_top, out_y, out_x) = (-1, 4, src_x)
         if src_y - (out_y+1) >= 3:
             src_y -= out_y+1
             reg_top -= out_y+1
             out_top = reg_top + reg_y + 1
+
         status_line = ' Text '[:src_x-2]
         stdscr.addstr(src_top-1, 2, status_line)
-
         middle = src_y // 2
         for i in range(src_y):
             addr = cursor_addr - middle*4 + i*4
@@ -1744,44 +1856,56 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
             stdscr.addstr(src_top+i, 1, lines[0][:src_x].ljust(src_x), color)
 
         # memory view
-        if mem_left >= 0:
-            stdscr.vline(1, mem_left-1, curses.ACS_VLINE, mem_y)
-            stdscr.addch(0, mem_left-1, curses.ACS_TTEE)
-            stdscr.addch(mem_y+1, mem_left-1, curses.ACS_BTEE)
+        if stack_left >= 0 or data_left >= 0:
+            stdscr.vline(1, max(data_left, stack_left)-1, curses.ACS_VLINE, size_y-2)
+            stdscr.addch(0, max(data_left, stack_left)-1, curses.ACS_TTEE)
+            stdscr.addch(size_y-1, max(data_left, stack_left)-1, curses.ACS_BTEE)
+            if stack_left >= 0 and data_left >= 0:
+                stdscr.hline(data_top-1, data_left, curses.ACS_HLINE, data_x)
+                stdscr.addch(data_top-1, data_left - 1, curses.ACS_LTEE)
+                stdscr.addch(data_top-1, data_left + data_x, curses.ACS_RTEE)
+            if stack_left >= 0:
+                status_line = ' Stack '[:stack_x-2]
+                stdscr.addstr(stack_top-1, stack_left+1, status_line)
+            if data_left >= 0:
+                status_line = ' Data '[:data_x-2]
+                stdscr.addstr(data_top-1, data_left+1, status_line)
 
-            lines = []
-            center_line = 0
-            if m.most_recent_memory >= m.stack_start:
-                status_line = ' Stack '[:mem_x-2]
-            elif m.data_start <= m.most_recent_memory < m.data_end:
-                status_line = ' Data '[:mem_x-2]
-            else:
-                status_line = ' Unknown memory '[:mem_x-2]
+            # add stack frame boundaries to the color list
+            frames = m.stack_frames + [m.get(r.index('sp'))]
+            if len(frames) > 1 and frames[-1] == frames[-2]:
+                frames.pop()
+            stack_colors = list(reversed(list(zip(frames, itertools.cycle(data_color_pairs)))))
+            data_colors.extend(stack_colors)
 
-            stdscr.addstr(0, mem_left+1, status_line)
-
-            middle = mem_y // 2
+            (left, top, middle) = (0, 1, 0)
             current_region = len(data_colors) - 1
-            for i in range(mem_y):
-                addr = (m.most_recent_memory & ~7) + middle*8 - i*8
+            def memory_line() -> None:
+                nonlocal current_region
                 while current_region > 0 and data_colors[current_region][0] > addr:
                     current_region -= 1
                 (addr_s, hex_s, ascii_s) = (f'{"":7}', '', '')
                 color = 0
                 for j in range(addr, addr+8):
                     if j >= m.data_start and j < m.data_end or j >= m.stack_start and j < m.stack_start+4096:
-                        if i == middle:
-                            addr_s = f'\03301{addr:06x}\03300:'
-                        else:
-                            addr_s = f'{addr:06x}:'
+                        addr_s = f'{addr:06x}:'
 
                         # did we just hit a label?
                         if current_region+1 < len(data_colors) and data_colors[current_region+1][0] == j:
                             current_region += 1
-                        if color != data_colors[current_region][1]:
+                        next_color = data_colors[current_region][1]
+
+                        (recent, size) = (m.most_recent_stack[0], m.most_recent_stack[1])
+                        if recent <= j < recent + size:
+                            next_color = 1
+                        (recent, size) = (m.most_recent_data[0], m.most_recent_data[1])
+                        if recent <= j < recent + size:
+                            next_color = 1
+                        
+                        if color != next_color:
                             if color != 0:
                                 hex_s += '\03300'
-                            color = data_colors[current_region][1]
+                            color = next_color
                             hex_s += f' \033{color:02}'
                             ascii_s += f'\033{color:02}'
                         elif j > addr:
@@ -1802,15 +1926,34 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
                 if color != 0:
                     hex_s += '\03300'
                     ascii_s += '\03300'
+                stdscr.addstr(top+i, left, addr_s, color)
+                addcolorstr(top+i, left, f'{addr_s}{hex_s} {ascii_s}', data_x)
 
-                stdscr.addstr(1+i, mem_left, addr_s, color)
-                addcolorstr(1+i, mem_left, f'{addr_s}{hex_s} {ascii_s}', mem_x)
+            if stack_left >= 0:
+                left = stack_left
+                top = stack_top
+                middle = stack_y // 2
+                current_region = len(data_colors) - 1
+                for i in range(stack_y):
+                    addr = (m.most_recent_stack[0] & ~7) + middle*8 - i*8
+                    memory_line()
+            if data_left >= 0:
+                left = data_left
+                top = data_top
+                middle = data_y // 2
+                current_region = len(data_colors) - 1
+                for i in range(data_y):
+                    addr = (m.most_recent_data[0] & ~7) + middle*8 - i*8
+                    memory_line()
+
+            # clear the stack frame colors
+            del data_colors[len(data_colors) - len(stack_colors):]
 
         # register view
         if reg_top >= 0:
             stdscr.hline(reg_top-1, 1, curses.ACS_HLINE, reg_x)
             stdscr.addch(reg_top-1, 0, curses.ACS_LTEE)
-            stdscr.addch(reg_top-1, reg_x+1, curses.ACS_RTEE)
+            stdscr.addch(reg_top-1, reg_x+1, curses.ACS_PLUS if reg_top == data_top else curses.ACS_RTEE)
             status_line = ' Registers '[:reg_x-2]
             stdscr.addstr(reg_top-1, 2, status_line)
 
@@ -1831,7 +1974,7 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
         if out_top >= 0:
             stdscr.hline(out_top-1, 1, curses.ACS_HLINE, out_x)
             stdscr.addch(out_top-1, 0, curses.ACS_LTEE)
-            stdscr.addch(out_top-1, out_x+1, curses.ACS_RTEE)
+            stdscr.addch(out_top-1, out_x+1, curses.ACS_PLUS if out_top == data_top else curses.ACS_RTEE)
             status_line = ' Output '[:out_x-2]
             stdscr.addstr(out_top-1, 2, status_line)
 
@@ -1842,10 +1985,8 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
         status_line = f' Step {seq_i+1}/{len(sequence)} PC:{pc:x} '[:size_x-4]
         stdscr.addstr(size_y-1, 2, status_line)
         stdscr.refresh()
+        m.gather_effects()
 
-    seq_i = 0
-    cursor_addr = sequence[seq_i][0].address
-    pc = cursor_addr
     resize()
     draw()
 
@@ -1982,9 +2123,9 @@ def main() -> None:
         return
 
     # trace the entire execution
-    # for run mode, haev pre_trace echo output as it goes
+    # for run mode, have pre_trace echo output as it goes
     # so inputs and outputs are correctly interleved
-    sequence = pre_trace(m, instructions, args.mode=='run')
+    sequence = pre_trace(m, instructions, args.mode in ('run', 'debug'), args.mode == 'debug')
 
     if args.mode == 'trace':
         for (instruction, effects) in sequence:
