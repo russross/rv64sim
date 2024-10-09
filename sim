@@ -387,7 +387,6 @@ class Instruction:
     execute: Callable[[Machine], None]
     static_target: Optional[int] = None
     return_target: Optional[int] = None
-    fallthrough: bool = True
     label: Optional[str] = None
     is_target: bool = False
     arrows: Optional[list[tuple[bool, bool, int]]] = None
@@ -820,8 +819,7 @@ def decode(labels: Machine, address: int, inst: int) -> Instruction:
                     m.other_message = 'ebreak'
                     m.terminate = True
 
-                return Instruction(address, inst, ['ebreak'], execute_ebreak,
-                    fallthrough=False)
+                return Instruction(address, inst, ['ebreak'], execute_ebreak)
 
     raise Fault(f'unknown opcode {opcode}')
 
@@ -854,7 +852,7 @@ def decode_jal(labels: Machine, address: int, inst: int, rd: int, imm: int) -> I
     else:
         fields = ['jal', r[rd], dest]
     return Instruction(address, inst, fields, execute_jal,
-        static_target=address + imm, fallthrough=False, return_target=None if rd == 0 else address + 4)
+        static_target=address + imm, return_target=None if rd == 0 else address + 4)
 
 def decode_jalr(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: int) -> Instruction:
     if funct3 != 0:
@@ -883,7 +881,7 @@ def decode_jalr(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
             fields = ['jalr', r[rd], f'{imm}({r[rs1]})']
 
     return Instruction(address, inst, fields, execute_jalr,
-        fallthrough=False, return_target=None if rd == 0 else address + 4)
+        return_target=None if rd == 0 else address + 4)
 
 def decode_branches(labels: Machine, address: int, inst: int, funct3: int, rs1: int, rs2: int, imm: int) -> Instruction:
     match funct3:
@@ -1598,7 +1596,6 @@ def add_labels(m: Machine, instructions: dict[int, Instruction]) -> None:
         next_fn[prev] = m.text_end
 
     # update branches to reference local labels
-    branches = []
     fn_start = 0
     for pc in range(m.text_start, m.text_end, 4):
         instruction = instructions[pc]
@@ -1649,15 +1646,6 @@ def add_labels(m: Machine, instructions: dict[int, Instruction]) -> None:
                 instruction.fields[-1] = f'{target_label}b'
             elif addr > pc:
                 instruction.fields[-1] = f'{target_label}f'
-
-        # record this for arrow drawing
-        branches.append( (abs(addr - pc), instruction.address) )
-
-    # draw branch arrows
-    branches.sort()
-    for (_, pc) in branches:
-        instruction = instructions[pc]
-        # TODO
 
 def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, echo_in: bool) -> list[tuple[Instruction, Effects]]:
     sequence = []
@@ -1834,11 +1822,41 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
             reg_top -= out_y+1
             out_top = reg_top + reg_y + 1
 
+        # source/text view
         status_line = ' Text '[:src_x-2]
         stdscr.addstr(src_top-1, 2, status_line)
         middle = src_y // 2
+
+        # draw arrows for taken branches
+        # or targets of taken branches
+        (arrow_top, arrow_top_addr) = ([], -1)
+        (arrow_bottom, arrow_bottom_addr) = ([], -1)
+
+        (instruction, effects) = sequence[seq_i]
+        if      instruction.fields[-1][-1] in 'bf' and \
+                instruction.static_target is not None and instruction.return_target is None and \
+                effects.pc[1] == instruction.static_target and \
+                effects.pc[0] != effects.pc[1] and \
+                effects.pc[0] + 4 != effects.pc[1]:
+            is_back = effects.pc[1] < effects.pc[0]
+            (arrow_top, arrow_top_addr) = (
+                [curses.ACS_ULCORNER, curses.ACS_HLINE, curses.ACS_HLINE] if is_back else \
+                [curses.ACS_ULCORNER, curses.ACS_HLINE, curses.ACS_HLINE],
+                effects.pc[1] if is_back else effects.pc[0])
+            (arrow_bottom, arrow_bottom_addr) = (
+                [curses.ACS_LLCORNER, curses.ACS_HLINE, curses.ACS_HLINE] if is_back else \
+                [curses.ACS_LLCORNER, curses.ACS_HLINE, curses.ACS_HLINE],
+                effects.pc[0] if is_back else effects.pc[1])
+
         for i in range(src_y):
             addr = cursor_addr - middle*4 + i*4
+            arrow = ''
+            if addr == arrow_top_addr:
+                arrow = arrow_top
+            elif addr == arrow_bottom_addr:
+                arrow = arrow_bottom
+            elif arrow_top_addr < addr < arrow_bottom_addr:
+                arrow = [curses.ACS_VLINE]
             if addr == pc:
                 (instruction, effects) = sequence[seq_i]
                 lines = render_line(instruction, effects)
@@ -1853,7 +1871,10 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
             else:
                 lines = ['']
                 color = curses.color_pair(0)
+                
             stdscr.addstr(src_top+i, 1, lines[0][:src_x].ljust(src_x), color)
+            for (j, ch) in enumerate(arrow):
+                stdscr.addch(src_top+i, 1+12+j, ch, color)
 
         # memory view
         if stack_left >= 0 or data_left >= 0:
