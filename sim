@@ -68,9 +68,9 @@ class Machine:
         self.function_end: Optional[int] = None
 
     def get_byte(self, addr: int) -> int:
-        if      not (addr >= self.memory_start and addr < self.memory_end) and \
+        if      not (addr >= self.data_start and addr < self.data_end) and \
                 not (addr >= self.stack_start  and addr < self.stack_end):
-            raise Fault(f'Segmentation fault in lb: address is {addr}')
+            raise Fault(f'segfault: get_byte addr={addr:x}')
         if addr < self.memory_end:
             raw = self.memory[addr - self.memory_start: addr+1 - self.memory_start]
         else:
@@ -79,9 +79,9 @@ class Machine:
         return int.from_bytes(raw, byteorder='little', signed=False)
 
     def load(self, addr: int, size: int) -> bytes:
-        if      not (addr >= self.memory_start and addr+size <= self.memory_end) and \
+        if      not (addr >= self.data_start and addr+size <= self.data_end) and \
                 not (addr >= self.stack_start  and addr+size <= self.stack_end):
-            raise Fault(f'Segmentation fault in load: address is {addr}, size is {size}')
+            raise Fault(f'segfault: load addr={addr:x} size={size}')
         if addr < self.memory_end:
             raw = self.memory[addr - self.memory_start: addr+size - self.memory_start]
         else:
@@ -91,9 +91,9 @@ class Machine:
         return raw
 
     def lb(self, addr: int) -> int:
-        if      not (addr >= self.memory_start and addr < self.memory_end) and \
+        if      not (addr >= self.data_start and addr < self.data_end) and \
                 not (addr >= self.stack_start  and addr < self.stack_end):
-            raise Fault(f'Segmentation fault in lb: address is {addr}')
+            raise Fault(f'segfault: lb addr={addr:x}')
         if addr < self.memory_end:
             raw = self.memory[addr - self.memory_start: addr+1 - self.memory_start]
         else:
@@ -104,10 +104,10 @@ class Machine:
 
     def lh(self, addr: int) -> int:
         if not MISALIGNED_OKAY and (addr & 1) != 0:
-            raise Fault(f'Bus error in lh: address is {addr}')
-        if      not (addr >= self.memory_start and addr+1 < self.memory_end) and \
+            raise Fault(f'bus error: lh addr={addr:x}')
+        if      not (addr >= self.data_start and addr+1 < self.data_end) and \
                 not (addr >= self.stack_start  and addr+1 < self.stack_end):
-            raise Fault(f'Segmentation fault in lh: address is {addr}')
+            raise Fault(f'segfault: lh addr={addr:x}')
 
         if addr < self.memory_end:
             raw = self.memory[addr - self.memory_start: addr+2 - self.memory_start]
@@ -119,10 +119,10 @@ class Machine:
 
     def lw(self, addr: int) -> int:
         if not MISALIGNED_OKAY and (addr & 3) != 0:
-            raise Fault(f'Bus error in lw: address is {addr}')
-        if      not (addr >= self.memory_start and addr+3 < self.memory_end) and \
+            raise Fault(f'bus error: lw addr={addr:x}')
+        if      not (addr >= self.data_start and addr+3 < self.data_end) and \
                 not (addr >= self.stack_start  and addr+3 < self.stack_end):
-            raise Fault(f'Segmentation fault in lw: address is {addr}')
+            raise Fault(f'segfault: lw addr={addr:x}')
 
         if addr < self.memory_end:
             raw = self.memory[addr - self.memory_start: addr+4 - self.memory_start]
@@ -134,10 +134,10 @@ class Machine:
 
     def ld(self, addr: int) -> int:
         if not MISALIGNED_OKAY and (addr & 7) != 0:
-            raise Fault(f'Bus error in ld: address is {addr}')
-        if      not (addr >= self.memory_start and addr+7 < self.memory_end) and \
+            raise Fault(f'bus error: ld addr={addr:x}')
+        if      not (addr >= self.data_start and addr+7 < self.data_end) and \
                 not (addr >= self.stack_start  and addr+7 < self.stack_end):
-            raise Fault(f'Segmentation fault in ld: address is {addr}')
+            raise Fault(f'segfault: ld addr={addr:x}')
 
         if addr < self.memory_end:
             raw = self.memory[addr - self.memory_start: addr+8 - self.memory_start]
@@ -148,9 +148,9 @@ class Machine:
         return int.from_bytes(raw, byteorder='little', signed=True)
 
     def lbu(self, addr: int) -> int:
-        if      not (addr >= self.memory_start and addr < self.memory_end) and \
+        if      not (addr >= self.data_start and addr < self.data_end) and \
                 not (addr >= self.stack_start  and addr < self.stack_end):
-            raise Fault(f'Segmentation fault in lbu: address is {addr}')
+            raise Fault(f'segfault: lbu addr={addr:x}')
 
         if addr < self.memory_end:
             raw = self.memory[addr - self.memory_start: addr+1 - self.memory_start]
@@ -162,10 +162,10 @@ class Machine:
 
     def lhu(self, addr: int) -> int:
         if not MISALIGNED_OKAY and (addr & 1) != 0:
-            raise Fault(f'Bus error in lhu: address is {addr}')
-        if      not (addr >= self.memory_start and addr+1 < self.memory_end) and \
+            raise Fault(f'bus error: lhu addr={addr:x}')
+        if      not (addr >= self.data_start and addr+1 < self.data_end) and \
                 not (addr >= self.stack_start  and addr+1 < self.stack_end):
-            raise Fault(f'Segmentation fault in lhu: address is {addr}')
+            raise Fault(f'segfault: lhu addr={addr:x}')
 
         if addr < self.memory_end:
             raw = self.memory[addr - self.memory_start: addr+2 - self.memory_start]
@@ -177,10 +177,10 @@ class Machine:
 
     def lwu(self, addr: int) -> int:
         if not MISALIGNED_OKAY and (addr & 3) != 0:
-            raise Fault(f'Bus error in lwu: address is {addr}')
-        if      not (addr >= self.memory_start and addr+3 < self.memory_end) and \
+            raise Fault(f'bus error: lwu addr={addr:x}')
+        if      not (addr >= self.data_start and addr+3 < self.data_end) and \
                 not (addr >= self.stack_start  and addr+3 < self.stack_end):
-            raise Fault(f'Segmentation fault in lwu: address is {addr}')
+            raise Fault(f'segfault: lwu addr={addr:x}')
 
         if addr < self.memory_end:
             raw = self.memory[addr - self.memory_start: addr+4 - self.memory_start]
@@ -192,9 +192,9 @@ class Machine:
 
     def store(self, addr: int, raw: bytes) -> None:
         size = len(raw)
-        if      not (addr >= self.memory_start and addr+size <= self.memory_end) and \
+        if      not (addr >= self.data_start and addr+size <= self.data_end) and \
                 not (addr >= self.stack_start  and addr+size <= self.stack_end):
-            raise Fault(f'Segmentation fault in sb: address is {addr}')
+            raise Fault(f'segfault: store addr={addr:x} size={size}')
 
         if addr < self.memory_end:
             old = self.memory[addr - self.memory_start: addr+size - self.memory_start]
@@ -206,10 +206,23 @@ class Machine:
         self.writes.append(MemoryValue(addr, raw, True))
         self.undos.append(MemoryValue(addr, old, True))
 
-    def sb(self, addr: int, value: int) -> None:
+    def set_byte(self, addr: int, value: int) -> None:
         if      not (addr >= self.memory_start and addr < self.memory_end) and \
                 not (addr >= self.stack_start  and addr < self.stack_end):
-            raise Fault(f'Segmentation fault in sb: address is {addr}')
+            raise Fault(f'segfault: set_byte addr={addr:x}')
+
+        raw = ctypes.c_int8(value).value.to_bytes(1, byteorder='little', signed=True)
+        if addr < self.memory_end:
+            for (i, b) in enumerate(raw):
+                self.memory[addr+i - self.memory_start] = b
+        else:
+            for (i, b) in enumerate(raw):
+                self.stack[addr+i - self.stack_start] = b
+
+    def sb(self, addr: int, value: int) -> None:
+        if      not (addr >= self.data_start and addr < self.data_end) and \
+                not (addr >= self.stack_start  and addr < self.stack_end):
+            raise Fault(f'segfault: sb addr={addr:x}')
 
         raw = ctypes.c_int8(value).value.to_bytes(1, byteorder='little', signed=True)
         if addr < self.memory_end:
@@ -226,10 +239,10 @@ class Machine:
 
     def sh(self, addr: int, value: int) -> None:
         if not MISALIGNED_OKAY and (addr & 1) != 0:
-            raise Fault(f'Bus error in sh: address is {addr}')
-        if      not (addr >= self.memory_start and addr+1 < self.memory_end) and \
+            raise Fault(f'bus error: sh addr={addr:x}')
+        if      not (addr >= self.data_start and addr+1 < self.data_end) and \
                 not (addr >= self.stack_start  and addr+1 < self.stack_end):
-            raise Fault(f'Segmentation fault in sh: address is {addr}')
+            raise Fault(f'segfault: sh addr={addr:x}')
 
         raw = ctypes.c_int16(value).value.to_bytes(2, byteorder='little', signed=True)
         if addr < self.memory_end:
@@ -246,10 +259,10 @@ class Machine:
 
     def sw(self, addr: int, value: int) -> None:
         if not MISALIGNED_OKAY and (addr & 3) != 0:
-            raise Fault(f'Bus error in sw: address is {addr}')
-        if      not (addr >= self.memory_start and addr+3 < self.memory_end) and \
+            raise Fault(f'bus error: sw addr={addr:x}')
+        if      not (addr >= self.data_start and addr+3 < self.data_end) and \
                 not (addr >= self.stack_start  and addr+3 < self.stack_end):
-            raise Fault(f'Segmentation fault in sw: address is {addr}')
+            raise Fault(f'segfault: sw addr={addr:x}')
 
         raw = ctypes.c_int32(value).value.to_bytes(4, byteorder='little', signed=True)
         if addr < self.memory_end:
@@ -266,10 +279,10 @@ class Machine:
 
     def sd(self, addr: int, value: int) -> None:
         if not MISALIGNED_OKAY and (addr & 7) != 0:
-            raise Fault(f'Bus error in sd: address is {addr}')
-        if      not (addr >= self.memory_start and addr+7 < self.memory_end) and \
+            raise Fault(f'bus error: sd addr={addr:x}')
+        if      not (addr >= self.data_start and addr+7 < self.data_end) and \
                 not (addr >= self.stack_start  and addr+7 < self.stack_end):
-            raise Fault(f'Segmentation fault in sd: address is {addr}')
+            raise Fault(f'segfault: sd addr={addr:x}')
 
         raw = ctypes.c_int64(value).value.to_bytes(8, byteorder='little', signed=True)
         if addr < self.memory_end:
@@ -286,9 +299,9 @@ class Machine:
 
     def load_instruction(self, addr: int) -> int:
         if not MISALIGNED_OKAY and (addr & 3) != 0:
-            raise Fault(f'Bus error in load_instruction: address is {addr}')
-        if not (addr >= self.memory_start and addr+3 < self.memory_end):
-            raise Fault(f'Segmentation fault in load_instruction: address is {addr}')
+            raise Fault(f'bus error: load_instruction addr={addr:x}')
+        if not (addr >= self.text_start and addr+3 < self.text_end):
+            raise Fault(f'segfault: load_instruction addr={addr:x}')
 
         raw = self.memory[addr - self.memory_start: addr+4 - self.memory_start]
         return int.from_bytes(raw, byteorder='little', signed=True)
@@ -322,7 +335,7 @@ class Machine:
         self.old_pc = self.pc
         self.pc = clip(value)
         if self.pc & 3 != 0:
-            raise Fault(f'Bus error: pc is {self.pc}')
+            raise Fault(f'bus error: pc addr={self.pc}')
 
     def mark_function_start(self) -> None:
         sp = self.get(r.index('sp'))
@@ -428,7 +441,7 @@ def apply(m: Machine, e: Effects, is_forward: bool) -> None:
         match w:
             case RegisterValue(rd, val):
                 m.set(rd, val)
-            case MemoryValue(address, val, signed):
+            case MemoryValue(address, val, _):
                 m.store(address, val)
     if e.stdout is not None:
         if is_forward:
@@ -484,10 +497,6 @@ def report_effects(e: Effects) -> str:
                     parts.append(f'{r[rd]} <- {hex(val)}')
                 else:
                     parts.append(f'{r[rd]} <- {val}')
-    for elt in e.reads:
-        match elt:
-            case RegisterValue(rs, val):
-                pass
     if e.pc[1] != e.pc[0] + 4:
         parts.append(f'pc <- {hex(e.pc[1])}')
     if e.other_message is not None:
@@ -695,7 +704,7 @@ def load_elf(filename: str) -> Machine:
             #print(f'    into virtual address 0x{p_vaddr:x} with size 0x{p_memsz:x}')
 
             for i in range(p_filesz):
-                m.sb(p_vaddr + i, raw[p_offset + i])
+                m.set_byte(p_vaddr + i, raw[p_offset + i])
 
         # m has been recording memory write effects, so reset it
         m.gather_effects()
@@ -821,7 +830,7 @@ def decode(labels: Machine, address: int, inst: int) -> Instruction:
 
                 return Instruction(address, inst, ['ebreak'], execute_ebreak)
 
-    raise Fault(f'unknown opcode {opcode}')
+    raise Fault(f'disassembler found unknown opcode {opcode}')
 
 def decode_lui(address: int, inst: int, rd: int, imm: int) -> Instruction:
     def execute_lui(m: Machine) -> None:
@@ -1507,40 +1516,32 @@ def decode_ecall(address: int, inst: int) -> Instruction:
             # read system call
             m.other_message = f'read({m.get(10)}, {hex(m.get(11))}, {m.get(12)})'
             if m.get(10) != 0:
-                raise Fault(f'Invalid file descriptor in read system call: {m.get(10)} but only 0 (stdin) is supported')
+                raise Fault(f'read syscall: only stdin (fd 0) supported, not {m.get(10)}')
             if m.get(12) < 0:
-                raise Fault(f'Invalid buffer size in read system call: {m.get(12)}')
+                raise Fault(f'read syscall: invalid buffer size: {m.get(12)}')
 
-            if      m.get(11) >= m.memory_start and m.get(11) + m.get(12) <= m.memory_end or \
-                    m.get(11) >= m.stack_start  and m.get(11) + m.get(12) <= m.stack_end:
-                read_res = sys.stdin.buffer.read(m.get(12))
-                m.store(m.get(11), read_res)
-                m.set(10, len(read_res))
-                m.stdin_delta = read_res
-                m.stdin += read_res
-                m.set_pc(m.pc + 4)
-                return
-            else:
-                raise Fault(f'Invalid memory range in read system call: {m.get(11)} to {m.get(11)+m.get(12)}')
+            read_res = sys.stdin.buffer.read(m.get(12))
+            m.store(m.get(11), read_res)
+            m.set(10, len(read_res))
+            m.stdin_delta = read_res
+            m.stdin += read_res
+            m.set_pc(m.pc + 4)
+            return
 
         if m.get(17) == 64:
             # write system call
             m.other_message = f'write({m.get(10)}, {hex(m.get(11))}, {m.get(12)})'
             if m.get(10) != 1:
-                raise Fault(f'Invalid file descriptor in write system call: {m.get(10)} but only 1 (stdout) is supported')
+                raise Fault(f'write syscall: only stdout (fd 1) supported, not {m.get(10)}')
             if m.get(12) < 0:
-                raise Fault(f'Invalid buffer size in write system call: {m.get(12)}')
+                raise Fault(f'write syscall: invalid buffer size: {m.get(12)}')
 
-            if      m.get(11) >= m.memory_start and m.get(11) + m.get(12) <= m.memory_end or \
-                    m.get(11) >= m.stack_start  and m.get(11) + m.get(12) <= m.stack_end:
-                buf = m.load(m.get(11), m.get(12))
-                m.set(10, len(buf))
-                m.stdout_delta = buf
-                m.stdout += buf
-                m.set_pc(m.pc + 4)
-                return
-            else:
-                raise Fault(f'Invalid memory range in write system call: {m.get(11)} to {m.get(11)+m.get(12)}')
+            buf = m.load(m.get(11), m.get(12))
+            m.set(10, len(buf))
+            m.stdout_delta = buf
+            m.stdout += buf
+            m.set_pc(m.pc + 4)
+            return
 
         if m.get(17) == 93:
             # exit system call
@@ -1578,7 +1579,6 @@ def add_labels(m: Machine, instructions: dict[int, Instruction]) -> None:
 
     # add numbered local labels
     next_label = 1
-    fn_name = ''
     next_fn = {}
     prev = -1
     for pc in range(m.text_start, m.text_end, 4):
@@ -1587,7 +1587,6 @@ def add_labels(m: Machine, instructions: dict[int, Instruction]) -> None:
             instruction.label = str(next_label)
             next_label += 1
         elif instruction.label is not None:
-            fn_name = instruction.label
             next_label = 1
             if prev >= 0:
                 next_fn[prev] = pc
@@ -1706,6 +1705,21 @@ def render_line(instruction: Instruction, effects: Optional[Effects]) -> list[st
 
     return result
 
+def calc_range(length: int, cursor: int, window_size: int) -> tuple[int, int]:
+    half = (window_size - 1) // 2
+    start = cursor - half
+    end = start + window_size
+    # shift up or down if it will fit more info
+    if start < 0:
+        shift = min(-start, max(0, length - end))
+        start += shift
+        end += shift
+    if end > length:
+        shift = min(end - length, max(0, start))
+        start -= shift
+        end -= shift
+    return (start, end)
+
 def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[Instruction, Effects]]) -> None:
     # make sure stdin is connected to the tty
     if not sys.stdin.isatty():
@@ -1784,7 +1798,8 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
     pc = cursor_addr
     def draw() -> None:
         nonlocal stdscr, size_y, size_x, src_y, src_x, seq_i, cursor_addr, pc, m, data_colors
-        if not active: return
+        if not active:
+            return
         stdscr.erase()
         stdscr.box()
 
@@ -1825,7 +1840,6 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
         # source/text view
         status_line = ' Text '[:src_x-2]
         stdscr.addstr(src_top-1, 2, status_line)
-        middle = src_y // 2
 
         # draw arrows for taken branches
         # or targets of taken branches
@@ -1840,17 +1854,19 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
                 effects.pc[0] + 4 != effects.pc[1]:
             is_back = effects.pc[1] < effects.pc[0]
             (arrow_top, arrow_top_addr) = (
-                [curses.ACS_ULCORNER, curses.ACS_HLINE, curses.ACS_HLINE] if is_back else \
                 [curses.ACS_ULCORNER, curses.ACS_HLINE, curses.ACS_HLINE],
                 effects.pc[1] if is_back else effects.pc[0])
             (arrow_bottom, arrow_bottom_addr) = (
-                [curses.ACS_LLCORNER, curses.ACS_HLINE, curses.ACS_HLINE] if is_back else \
                 [curses.ACS_LLCORNER, curses.ACS_HLINE, curses.ACS_HLINE],
                 effects.pc[0] if is_back else effects.pc[1])
 
+        (start, _) = calc_range(
+            (m.text_end - m.text_start)//4,
+            (cursor_addr - m.text_start)//4,
+            src_y)
         for i in range(src_y):
-            addr = cursor_addr - middle*4 + i*4
-            arrow = ''
+            addr = m.text_start + (start + i)*4
+            arrow = []
             if addr == arrow_top_addr:
                 arrow = arrow_top
             elif addr == arrow_bottom_addr:
@@ -1899,7 +1915,7 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
             stack_colors = list(reversed(list(zip(frames, itertools.cycle(data_color_pairs)))))
             data_colors.extend(stack_colors)
 
-            (left, top, middle) = (0, 1, 0)
+            (left, top) = (0, 1)
             current_region = len(data_colors) - 1
             def memory_line() -> None:
                 nonlocal current_region
@@ -1953,18 +1969,25 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
             if stack_left >= 0:
                 left = stack_left
                 top = stack_top
-                middle = stack_y // 2
                 current_region = len(data_colors) - 1
+                (_, end) = calc_range(
+                    (m.stack_end - m.stack_start)//8,
+                    (m.most_recent_stack[0] - m.stack_start)//8,
+                    stack_y)
+
                 for i in range(stack_y):
-                    addr = (m.most_recent_stack[0] & ~7) + middle*8 - i*8
+                    addr = m.stack_start + (end - 1 - i)*8
                     memory_line()
             if data_left >= 0:
                 left = data_left
                 top = data_top
-                middle = data_y // 2
                 current_region = len(data_colors) - 1
+                (_, end) = calc_range(
+                    (m.data_end - m.data_start)//8,
+                    (m.most_recent_data[0] - m.data_start)//8,
+                    data_y)
                 for i in range(data_y):
-                    addr = (m.most_recent_data[0] & ~7) + middle*8 - i*8
+                    addr = m.data_start + (end - 1 - i)*8
                     memory_line()
 
             # clear the stack frame colors
