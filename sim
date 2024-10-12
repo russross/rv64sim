@@ -24,7 +24,6 @@ class Machine:
         assert(memory_end > memory_start)
         assert(memory_start & 0xfff == 0)
         assert(memory_end & 0xfff == 0)
-        self.memory = bytearray(memory_end - memory_start)
         self.memory_start = memory_start
         self.memory_end = memory_end
         self.pc_start = pc_start
@@ -36,23 +35,34 @@ class Machine:
         self.data_symbols = data_symbols
         self.other_symbols = other_symbols
         self.global_pointer = global_pointer
-        self.stdout = bytearray()
-        self.stdin = bytearray()
-        self.stack_frames: list[int] = []
-
-        # allocate a stack with a guard page
-        self.stack = bytearray(4096)
         self.stack_start = 0x1000000 - 4096
         if self.stack_start < memory_end + 4096:
             self.stack_start = memory_end + 4096
         self.stack_end = self.stack_start + 4096
+        self.regions: list[tuple[int, bytes]] = []
+
+    def init_memory(self, addr: int, data: bytes) -> None:
+        self.regions.append( (addr, data) )
+
+    def reset(self) -> None:
+        # allocate memory
+        self.stack = bytearray(4096)
+        self.memory = bytearray(self.memory_end - self.memory_start)
+
+        # load elf segments into memory
+        for (addr, raw) in self.regions:
+            self.store(addr, raw, True)
 
         # set up cpu state
         self.x = [0] * 32
-        self.pc = pc_start
+        self.pc = self.pc_start
         self.x[2] = self.stack_end
 
         # set up tracing
+        self.stdout = bytearray()
+        self.stdin = bytearray()
+        self.stack_frames: list[int] = []
+
         self.old_pc = 0
         self.reads: list[Value] = []
         self.writes: list[Value] = []
@@ -61,8 +71,8 @@ class Machine:
         self.stdout_delta: Optional[bytes] = None
         self.other_message: Optional[str] = None
         self.terminate = False
-        self.most_recent_memory = data_start if data_start > 0 else self.stack_end - 8
-        self.most_recent_data = (data_start, 0)
+        self.most_recent_memory = self.data_start if self.data_start > 0 else self.stack_end - 8
+        self.most_recent_data = (self.data_start, 0)
         self.most_recent_stack = (self.stack_end, 0)
         self.function_start: Optional[int] = None
         self.function_end: Optional[int] = None
@@ -190,10 +200,12 @@ class Machine:
         self.reads.append(MemoryValue(addr, raw, False))
         return int.from_bytes(raw, byteorder='little', signed=False)
 
-    def store(self, addr: int, raw: bytes) -> None:
+    def store(self, addr: int, raw: bytes, init: bool = False) -> None:
         size = len(raw)
-        if      not (addr >= self.data_start and addr+size <= self.data_end) and \
-                not (addr >= self.stack_start  and addr+size <= self.stack_end):
+        if      not (addr >= self.data_start  and addr+size <= self.data_end) and \
+                not (addr >= self.stack_start and addr+size <= self.stack_end) and \
+               (not init or \
+                not (addr >= (self.text_start & ~4095) and addr+size <= self.text_end)):
             raise Fault(f'segfault: store addr={addr:x} size={size}')
 
         if addr < self.memory_end:
@@ -203,21 +215,9 @@ class Machine:
             old = self.stack[addr - self.stack_start: addr+size - self.stack_start]
             self.stack[addr - self.stack_start: addr+size - self.stack_start] = raw
 
-        self.writes.append(MemoryValue(addr, raw, True))
-        self.undos.append(MemoryValue(addr, old, True))
-
-    def set_byte(self, addr: int, value: int) -> None:
-        if      not (addr >= self.memory_start and addr < self.memory_end) and \
-                not (addr >= self.stack_start  and addr < self.stack_end):
-            raise Fault(f'segfault: set_byte addr={addr:x}')
-
-        raw = ctypes.c_int8(value).value.to_bytes(1, byteorder='little', signed=True)
-        if addr < self.memory_end:
-            for (i, b) in enumerate(raw):
-                self.memory[addr+i - self.memory_start] = b
-        else:
-            for (i, b) in enumerate(raw):
-                self.stack[addr+i - self.stack_start] = b
+        if not init:
+            self.writes.append(MemoryValue(addr, raw, True))
+            self.undos.append(MemoryValue(addr, old, True))
 
     def sb(self, addr: int, value: int) -> None:
         if      not (addr >= self.data_start and addr < self.data_end) and \
@@ -538,177 +538,184 @@ def load_elf(filename: str) -> Machine:
     with open(filename, mode='rb') as fp:
         raw = fp.read()
 
-        # unpack the elf header
+    # unpack the elf header
+    (
+        e_ident_mag,
+        e_ident_class, e_ident_data, e_ident_version, e_ident_osabi,
+        e_ident_abiversion,
+
+        e_type, e_machine, e_version, e_entry,
+
+        e_phoff, e_shoff,
+
+        e_flags, e_ehsize, e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx
+    ) = struct.unpack('<4s5B7x'+'2HIQ'+'2Q'+'I6H', raw[:0x40])
+
+    # sanity check everything
+    assert(e_ident_mag == b'\x7fELF')       # magic number
+    assert(e_ident_class == 2)              # 64 bit
+    assert(e_ident_data == 1)               # little endian
+    assert(e_ident_version == 1)            # version 1 format
+    assert(e_ident_osabi == 0)              # System V ABI
+
+    assert(e_type == 2)                     # executable
+    assert(e_machine == 0xf3)               # RISC-V
+    assert(e_version == 1)                  # ELF version 1
+
+    assert(e_phoff == 0x40)                 # start of program headers
+    assert(e_ehsize == 0x40)                # size of elf header
+    assert(e_phentsize == 0x38)             # size of program header entry
+    assert(e_phnum >= 1)                    # number of program header entries
+
+    # first pass--find how big the VM footprint is
+    memory_start, memory_end = 0, 0
+    for i in range(e_phnum):
+        # unpack the program header
+        #print('unpacking program header')
+        start = e_phoff + e_phentsize*i
         (
-            e_ident_mag,
-            e_ident_class, e_ident_data, e_ident_version, e_ident_osabi,
-            e_ident_abiversion,
+            p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align
+        ) = struct.unpack('<2I6Q', raw[start:start+e_phentsize])
 
-            e_type, e_machine, e_version, e_entry,
+        if p_type != 1:
+            continue
+        assert(p_vaddr >= 0)
+        #print(f'found section at {p_vaddr} + {p_memsz}')
+        if memory_end == 0 or p_vaddr < memory_start:
+            memory_start = p_vaddr
+        if p_vaddr + p_memsz > memory_end:
+            memory_end = p_vaddr + p_memsz
 
-            e_phoff, e_shoff,
+    # get the section header strings
+    i = e_shstrndx
+    start = e_shoff + e_shentsize*i
+    (
+        sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size,
+        sh_link, sh_info, sh_addralign, sh_entsize
+    ) = struct.unpack('<2I4Q2I2Q', raw[start:start+e_shentsize])
 
-            e_flags, e_ehsize, e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx
-        ) = struct.unpack('<4s5B7x'+'2HIQ'+'2Q'+'I6H', raw[:0x40])
+    # unpack the strings, keyed by offset
+    sh_strs = {}
+    sh_str_raw = raw[sh_offset:sh_offset + sh_size]
+    start = 0
+    for (i, b) in enumerate(sh_str_raw):
+        if b == 0:
+            sh_strs[start] = sh_str_raw[start:i].decode()
+            start = i+1
 
-        # sanity check everything
-        assert(e_ident_mag == b'\x7fELF')       # magic number
-        assert(e_ident_class == 2)              # 64 bit
-        assert(e_ident_data == 1)               # little endian
-        assert(e_ident_version == 1)            # version 1 format
-        assert(e_ident_osabi == 0)              # System V ABI
-
-        assert(e_type == 2)                     # executable
-        assert(e_machine == 0xf3)               # RISC-V
-        assert(e_version == 1)                  # ELF version 1
-
-        assert(e_phoff == 0x40)                 # start of program headers
-        assert(e_ehsize == 0x40)                # size of elf header
-        assert(e_phentsize == 0x38)             # size of program header entry
-        assert(e_phnum >= 1)                    # number of program header entries
-
-        # first pass--find how big the VM footprint is
-        memory_start, memory_end = 0, 0
-        for i in range(e_phnum):
-            # unpack the program header
-            #print('unpacking program header')
-            start = e_phoff + e_phentsize*i
-            (
-                p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align
-            ) = struct.unpack('<2I6Q', raw[start:start+e_phentsize])
-
-            if p_type != 1:
-                continue
-            assert(p_vaddr >= 0)
-            #print(f'found section at {p_vaddr} + {p_memsz}')
-            if memory_end == 0 or p_vaddr < memory_start:
-                memory_start = p_vaddr
-            if p_vaddr + p_memsz > memory_end:
-                memory_end = p_vaddr + p_memsz
-
-        # get the section header strings
-        i = e_shstrndx
+    # read the section headers
+    text_start, text_end = 0, 0
+    data_start, data_end = 0, 0
+    (strs_raw, syms_raw) = (b'', b'')
+    seg_text, seg_data, seg_bss = -1, -1, -1
+    for i in range(e_shnum):
+        # unpack the section header
         start = e_shoff + e_shentsize*i
         (
             sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size,
             sh_link, sh_info, sh_addralign, sh_entsize
         ) = struct.unpack('<2I4Q2I2Q', raw[start:start+e_shentsize])
 
-        # unpack the strings, keyed by offset
-        sh_strs = {}
-        sh_str_raw = raw[sh_offset:sh_offset + sh_size]
-        start = 0
-        for (i, b) in enumerate(sh_str_raw):
-            if b == 0:
-                sh_strs[start] = sh_str_raw[start:i].decode()
-                start = i+1
+        #print(f'{i}: name: {sh_strs[sh_name]}. type: {hex(sh_type)}')
+        if sh_strs[sh_name] == '.text' and sh_flags & 4 != 0 and sh_type == 1:
+            assert(text_start == 0 and text_end == 0)
+            seg_text = i
+            text_start, text_end = sh_addr, sh_addr + sh_size
 
-        text_start, text_end = 0, 0
-        data_start, data_end = 0, 0
-        (strs_raw, syms_raw) = (b'', b'')
-        seg_text, seg_data = -1, -1
-        # read the section headers
-        for i in range(e_shnum):
-            # unpack the section header
-            start = e_shoff + e_shentsize*i
-            (
-                sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size,
-                sh_link, sh_info, sh_addralign, sh_entsize
-            ) = struct.unpack('<2I4Q2I2Q', raw[start:start+e_shentsize])
+        elif sh_strs[sh_name] == '.data':
+            seg_data = i
+            data_start, data_end = sh_addr, sh_addr + sh_size
 
-            #print(f'{i}: name: {sh_strs[sh_name]}. type: {hex(sh_type)}')
-            if sh_strs[sh_name] == '.text' and sh_flags & 4 != 0 and sh_type == 1:
-                assert(text_start == 0 and text_end == 0)
-                seg_text = i
-                text_start, text_end = sh_addr, sh_addr + sh_size
+        elif sh_strs[sh_name] == '.bss':
+            seg_bss = i
+            bss_start, bss_end = sh_addr, sh_addr + sh_size
 
-            elif sh_strs[sh_name] == '.data':
-                seg_data = i
-                data_start, data_end = sh_addr, sh_addr + sh_size
+        elif sh_strs[sh_name] == '.strtab' and sh_type == 3:
+            strs_raw = raw[sh_offset:sh_offset + sh_size]
 
-            elif sh_strs[sh_name] == '.strtab' and sh_type == 3:
-                strs_raw = raw[sh_offset:sh_offset + sh_size]
+        elif sh_strs[sh_name] == '.symtab' and sh_type == 2:
+            syms_raw = raw[sh_offset:sh_offset + sh_size]
 
-            elif sh_strs[sh_name] == '.symtab' and sh_type == 2:
-                syms_raw = raw[sh_offset:sh_offset + sh_size]
+    if bss_start > 0 and bss_end > data_end:
+        data_end = bss_end
 
-        assert(len(strs_raw) > 0)
-        assert(len(syms_raw) > 0)
-        assert(seg_text >= 0)
+    assert(len(strs_raw) > 0)
+    assert(len(syms_raw) > 0)
+    assert(seg_text >= 0)
 
-        # parse the symbol table
-        text_symbols = {}
-        data_symbols = {}
-        other_symbols = {}
-        global_pointer = 0
-        symbol_size = 24
-        for start in range(0, len(syms_raw), symbol_size):
-            (
-                st_name, st_info, st_other, st_shndx, st_value, st_size
-            ) = struct.unpack('<I2BH2Q', syms_raw[start:start+symbol_size])
+    # parse the symbol table
+    text_symbols = {}
+    data_symbols = {}
+    other_symbols = {}
+    global_pointer = 0
+    symbol_size = 24
+    for start in range(0, len(syms_raw), symbol_size):
+        (
+            st_name, st_info, st_other, st_shndx, st_value, st_size
+        ) = struct.unpack('<I2BH2Q', syms_raw[start:start+symbol_size])
 
-            # find the name
-            for end in range(st_name, len(strs_raw)):
-                if strs_raw[end] == 0:
-                    break
-            name = strs_raw[st_name:end].decode()
-            if len(name) == 0:
-                # skip section entries
-                continue
-            elif st_info == 4:
-                # skip object file names
-                continue
-            elif name == '__global_pointer$':
-                # keep global pointer
-                global_pointer = st_value
-                continue
-            elif name.startswith('$') or name.startswith('__'):
-                # skip internal names
-                continue
+        # find the name
+        for end in range(st_name, len(strs_raw)):
+            if strs_raw[end] == 0:
+                break
+        name = strs_raw[st_name:end].decode()
+        if len(name) == 0:
+            # skip section entries
+            continue
+        elif st_info == 4:
+            # skip object file names
+            continue
+        elif name == '__global_pointer$':
+            # keep global pointer
+            global_pointer = st_value
+            continue
+        elif name.startswith('$') or name.startswith('__'):
+            # skip internal names
+            continue
 
-            # sort into text, data, and other symbols
-            if st_shndx == seg_text:
-                text_symbols[st_value] = name
-            elif st_shndx == seg_data and seg_data >= 0:
-                data_symbols[st_value] = name
-            else:
-                other_symbols[st_value] = name
+        # sort into text, data/bss, and other symbols
+        if st_shndx == seg_text:
+            text_symbols[st_value] = name
+        elif st_shndx == seg_data and seg_data >= 0:
+            data_symbols[st_value] = name
+        elif st_shndx == seg_bss and seg_bss >= 0:
+            data_symbols[st_value] = name
+        else:
+            other_symbols[st_value] = name
 
 
-        # round to page boundaries at both ends
-        memory_start &= ~4095
-        memory_end = (memory_end + 4095) & ~4095
+    # round to page boundaries at both ends
+    memory_start &= ~4095
+    memory_end = (memory_end + 4095) & ~4095
 
-        assert(text_start != 0 and text_end != 0)
-        assert(text_start <= e_entry < text_end)
+    assert(text_start != 0 and text_end != 0)
+    assert(text_start <= e_entry < text_end)
 
-        # allocate a page of stack
-        #print(f'allocated {(memory_end - memory_start) // 1024}k address space from 0x{memory_start:x} to 0x{memory_end:x} (not including 4k stack)')
+    # allocate a page of stack
+    #print(f'allocated {(memory_end - memory_start) // 1024}k address space from 0x{memory_start:x} to 0x{memory_end:x} (not including 4k stack)')
 
-        # allocate address space
-        m = Machine(memory_start, memory_end, e_entry, text_start, text_end, text_symbols, data_start, data_end, data_symbols, other_symbols, global_pointer)
+    # allocate address space
+    m = Machine(memory_start, memory_end, e_entry, text_start, text_end, text_symbols, data_start, data_end, data_symbols, other_symbols, global_pointer)
 
-        # second pass--load the segments
-        for i in range(e_phnum):
-            # unpack the program header
-            #print(f'unpacking program header {i+1}')
-            start = e_phoff + e_phentsize*i
-            (
-                p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align
-            ) = struct.unpack('<2I6Q', raw[start:start+e_phentsize])
+    # second pass--load the segments
+    for i in range(e_phnum):
+        # unpack the program header
+        #print(f'unpacking program header {i+1}')
+        start = e_phoff + e_phentsize*i
+        (
+            p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align
+        ) = struct.unpack('<2I6Q', raw[start:start+e_phentsize])
 
-            if p_type != 1:
-                #print('    skipping non-loadable segment')
-                continue
-            #print(f'    loading segment from offset 0x{p_offset:x} with size 0x{p_filesz:x}')
-            #print(f'    into virtual address 0x{p_vaddr:x} with size 0x{p_memsz:x}')
+        if p_type != 1:
+            #print('    skipping non-loadable segment')
+            continue
+        #print(f'    loading segment from offset 0x{p_offset:x} with size 0x{p_filesz:x}')
+        #print(f'    into virtual address 0x{p_vaddr:x} with size 0x{p_memsz:x}')
 
-            for i in range(p_filesz):
-                m.set_byte(p_vaddr + i, raw[p_offset + i])
+        m.init_memory(p_vaddr, raw[p_offset:p_offset+p_filesz])
 
-        # m has been recording memory write effects, so reset it
-        m.gather_effects()
-        return m
+    m.reset()
+    return m
 
 # instruction decoders
 def get_funct3(inst: int) -> int:
@@ -884,10 +891,8 @@ def decode_jalr(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
             fields = ['jr', r[rs1]]
         case ('ra', 0, _):
             fields = ['jalr', r[rs1]]
-        case (_, 0, _):
-            fields = ['jalr', r[rd], f'({r[rs1]})']
         case _:
-            fields = ['jalr', r[rd], f'{imm}({r[rs1]})']
+            fields = ['jalr', r[rd], str(imm), '()', r[rs1]]
 
     return Instruction(address, inst, fields, execute_jalr,
         return_target=None if rd == 0 else address + 4)
@@ -1000,7 +1005,7 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
                 m.set(rd, m.lb(effective_address))
                 m.set_pc(m.pc + 4)
 
-            fields=['lb', r[rd], ('' if imm == 0 else str(imm)) + f'({r[rs1]})']
+            fields=['lb', r[rd], str(imm), '()', r[rs1]]
 
             return Instruction(address, inst, fields, execute_lb)
 
@@ -1010,7 +1015,7 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
                 m.set(rd, m.lh(effective_address))
                 m.set_pc(m.pc + 4)
 
-            fields=['lh', r[rd], ('' if imm == 0 else str(imm)) + f'({r[rs1]})']
+            fields=['lh', r[rd], str(imm), '()', r[rs1]]
 
             return Instruction(address, inst, fields, execute_lh)
 
@@ -1020,7 +1025,7 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
                 m.set(rd, m.lw(effective_address))
                 m.set_pc(m.pc + 4)
 
-            fields=['lw', r[rd], ('' if imm == 0 else str(imm)) + f'({r[rs1]})']
+            fields=['lw', r[rd], str(imm), '()', r[rs1]]
 
             return Instruction(address, inst, fields, execute_lw)
 
@@ -1030,7 +1035,7 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
                 m.set(rd, m.ld(effective_address))
                 m.set_pc(m.pc + 4)
 
-            fields=['ld', r[rd], ('' if imm == 0 else str(imm)) + f'({r[rs1]})']
+            fields=['ld', r[rd], str(imm), '()', r[rs1]]
 
             return Instruction(address, inst, fields, execute_ld)
 
@@ -1040,7 +1045,7 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
                 m.set(rd, m.lbu(effective_address))
                 m.set_pc(m.pc + 4)
 
-            fields=['lbu', r[rd], ('' if imm == 0 else str(imm)) + f'({r[rs1]})']
+            fields=['lbu', r[rd], str(imm), '()', r[rs1]]
 
             return Instruction(address, inst, fields, execute_lbu)
 
@@ -1050,7 +1055,7 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
                 m.set(rd, m.lhu(effective_address))
                 m.set_pc(m.pc + 4)
 
-            fields=['lhu', r[rd], ('' if imm == 0 else str(imm)) + f'({r[rs1]})']
+            fields=['lhu', r[rd], str(imm), '()', r[rs1]]
 
             return Instruction(address, inst, fields, execute_lhu)
 
@@ -1060,7 +1065,7 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
                 m.set(rd, m.lwu(effective_address))
                 m.set_pc(m.pc + 4)
 
-            fields=['lwu', r[rd], ('' if imm == 0 else str(imm)) + f'({r[rs1]})']
+            fields=['lwu', r[rd], str(imm), '()', r[rs1]]
 
             return Instruction(address, inst, fields, execute_lwu)
 
@@ -1075,7 +1080,7 @@ def decode_store(address: int, inst: int, funct3: int, rs1: int, rs2: int, imm: 
                 m.sb(effective_address, val8)
                 m.set_pc(m.pc + 4)
 
-            fields=['sb', r[rs2], ('' if imm == 0 else str(imm)) + f'({r[rs1]})']
+            fields=['sb', r[rs2], str(imm), '()', r[rs1]]
 
             return Instruction(address, inst, fields, execute_sb)
 
@@ -1086,7 +1091,7 @@ def decode_store(address: int, inst: int, funct3: int, rs1: int, rs2: int, imm: 
                 m.sh(effective_address, val16)
                 m.set_pc(m.pc + 4)
 
-            fields=['sh', r[rs2], ('' if imm == 0 else str(imm)) + f'({r[rs1]})']
+            fields=['sh', r[rs2], str(imm), '()', r[rs1]]
 
             return Instruction(address, inst, fields, execute_sh)
 
@@ -1097,7 +1102,7 @@ def decode_store(address: int, inst: int, funct3: int, rs1: int, rs2: int, imm: 
                 m.sw(effective_address, val32)
                 m.set_pc(m.pc + 4)
 
-            fields=['sw', r[rs2], ('' if imm == 0 else str(imm)) + f'({r[rs1]})']
+            fields=['sw', r[rs2], str(imm), '()', r[rs1]]
 
             return Instruction(address, inst, fields, execute_sw)
 
@@ -1107,7 +1112,7 @@ def decode_store(address: int, inst: int, funct3: int, rs1: int, rs2: int, imm: 
                 m.sd(effective_address, m.get(rs2))
                 m.set_pc(m.pc + 4)
 
-            fields=['sd', r[rs2], ('' if imm == 0 else str(imm)) + f'({r[rs1]})']
+            fields=['sd', r[rs2], str(imm), '()', r[rs1]]
 
             return Instruction(address, inst, fields, execute_sd)
 
@@ -1568,6 +1573,14 @@ def pair_instructions(m: Machine, instructions: dict[int, Instruction]) -> None:
                     else:
                         sym = m.data_label(addr)
                     instruction.fields = ['auipc', rd0, imm0, f'[la {rd0}, {sym}]']
+                case (Instruction(fields=['auipc', rd0, imm0]),
+                      Instruction(fields=['jalr', rd, imm, '()', rs1])) if rd0 == rd and rs1 == rd:
+                    addr = pc + int(imm0) + int(imm)
+                    if m.text_start <= addr <= m.text_end:
+                        sym = m.text_label(addr, pc=pc)
+                    else:
+                        sym = m.data_label(addr)
+                    instruction.fields = ['auipc', rd0, imm0, f'[call {sym}]']
 
 def add_labels(m: Machine, instructions: dict[int, Instruction]) -> None:
     # add labels from the symbol table and note branch targets
@@ -1666,12 +1679,6 @@ def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, 
             sys.stdout.flush()
         if e.terminate:
             break
-
-    # now rewind
-    for (instruction, e) in reversed(sequence):
-        apply(m, e, False)
-    set_most_recent_memory(m, sequence, 0)
-
     return sequence
 
 def find_function_bounds(m: Machine, pc: int) -> tuple[int, int]:
@@ -1685,7 +1692,21 @@ def find_function_bounds(m: Machine, pc: int) -> tuple[int, int]:
     return (start, end)
 
 def render_line(instruction: Instruction, effects: Optional[Effects]) -> list[str]:
-    disasm = f'{instruction.fields[0]:<8}' + ', '.join(instruction.fields[1:])
+    fields = list(instruction.fields)
+    if fields[-1][0] == '[':
+        comment = fields.pop()
+    else:
+        comment = ''
+    if len(fields) >= 3 and fields[-2] == '()':
+        if fields[-3] == '0':
+            parts = fields[1:-3] + [f'({fields[-1]})']
+        else:
+            parts = fields[1:-3] + [f'{fields[-3]}({fields[-1]})']
+    else:
+        parts = fields[1:]
+    if comment != '':
+        parts.append(comment)
+    disasm = f'{instruction.fields[0]:<8}' + ', '.join(parts)
     if instruction.label is None:
         addr_part = ''
     else:
@@ -2177,6 +2198,9 @@ def main() -> None:
                 print(line)
 
     if args.mode == 'debug':
+        # reload to reset memory state
+        m.reset()
+        set_most_recent_memory(m, sequence, 0)
         ui(m, instructions, sequence)
 
     # should have ended with exit(0)
