@@ -11,14 +11,13 @@ import sys
 import struct
 from typing import Callable, Optional, TypeAlias
 
-MISALIGNED_OKAY = True
-
 class Machine:
     def __init__(self,
             memory_start: int, memory_end: int, pc_start: int,
             text_start: int, text_end: int, text_symbols: dict[int, str],
             data_start: int, data_end: int, data_symbols: dict[int, str],
-            other_symbols: dict[int, str], global_pointer: int) -> None:
+            other_symbols: dict[int, str], other_symbols_by_name: dict[str, int],
+            global_pointer: int) -> None:
         # allocate memory
         assert(memory_start >= 4096)
         assert(memory_end > memory_start)
@@ -34,6 +33,7 @@ class Machine:
         self.data_end = data_end
         self.data_symbols = data_symbols
         self.other_symbols = other_symbols
+        self.other_symbols_by_name = other_symbols_by_name
         self.global_pointer = global_pointer
         self.stack_start = 0x1000000 - 4096
         if self.stack_start < memory_end + 4096:
@@ -51,7 +51,7 @@ class Machine:
 
         # load elf segments into memory
         for (addr, raw) in self.regions:
-            self.store(addr, raw, True)
+            self.store(addr, raw, text_okay=True, record=False)
 
         # set up cpu state
         self.x = [0] * 32
@@ -64,9 +64,10 @@ class Machine:
         self.stack_frames: list[int] = []
 
         self.old_pc = 0
-        self.reads: list[Value] = []
-        self.writes: list[Value] = []
-        self.undos: list[Value] = []
+        self.reg_reads: list[RegisterValue] = []
+        self.reg_write: Optional[tuple[RegisterValue, RegisterValue]] = None
+        self.mem_read: Optional[MemoryValue] = None
+        self.mem_write: Optional[tuple[MemoryValue, MemoryValue]] = None
         self.stdin_delta: Optional[bytes] = None
         self.stdout_delta: Optional[bytes] = None
         self.other_message: Optional[str] = None
@@ -74,8 +75,6 @@ class Machine:
         self.most_recent_memory = self.data_start if self.data_start > 0 else self.stack_end - 8
         self.most_recent_data = (self.data_start, 0)
         self.most_recent_stack = (self.stack_end, 0)
-        self.function_start: Optional[int] = None
-        self.function_end: Optional[int] = None
 
     def get_byte(self, addr: int) -> int:
         if      not (addr >= self.data_start and addr < self.data_end) and \
@@ -97,7 +96,8 @@ class Machine:
         else:
             raw = self.stack[addr - self.stack_start: addr+size - self.stack_start]
 
-        self.reads.append(MemoryValue(addr, raw, False))
+        assert(self.mem_read is None)
+        self.mem_read = MemoryValue(addr, raw, False)
         return raw
 
     def lb(self, addr: int) -> int:
@@ -109,12 +109,11 @@ class Machine:
         else:
             raw = self.stack[addr - self.stack_start: addr+1 - self.stack_start]
 
-        self.reads.append(MemoryValue(addr, raw, True))
+        assert(self.mem_read is None)
+        self.mem_read = MemoryValue(addr, raw, True)
         return int.from_bytes(raw, byteorder='little', signed=True)
 
     def lh(self, addr: int) -> int:
-        if not MISALIGNED_OKAY and (addr & 1) != 0:
-            raise Fault(f'bus error: lh addr={addr:x}')
         if      not (addr >= self.data_start and addr+1 < self.data_end) and \
                 not (addr >= self.stack_start  and addr+1 < self.stack_end):
             raise Fault(f'segfault: lh addr={addr:x}')
@@ -124,12 +123,11 @@ class Machine:
         else:
             raw = self.stack[addr - self.stack_start: addr+2 - self.stack_start]
 
-        self.reads.append(MemoryValue(addr, raw, True))
+        assert(self.mem_read is None)
+        self.mem_read = MemoryValue(addr, raw, True)
         return int.from_bytes(raw, byteorder='little', signed=True)
 
     def lw(self, addr: int) -> int:
-        if not MISALIGNED_OKAY and (addr & 3) != 0:
-            raise Fault(f'bus error: lw addr={addr:x}')
         if      not (addr >= self.data_start and addr+3 < self.data_end) and \
                 not (addr >= self.stack_start  and addr+3 < self.stack_end):
             raise Fault(f'segfault: lw addr={addr:x}')
@@ -139,12 +137,11 @@ class Machine:
         else:
             raw = self.stack[addr - self.stack_start: addr+4 - self.stack_start]
 
-        self.reads.append(MemoryValue(addr, raw, True))
+        assert(self.mem_read is None)
+        self.mem_read = MemoryValue(addr, raw, True)
         return int.from_bytes(raw, byteorder='little', signed=True)
 
     def ld(self, addr: int) -> int:
-        if not MISALIGNED_OKAY and (addr & 7) != 0:
-            raise Fault(f'bus error: ld addr={addr:x}')
         if      not (addr >= self.data_start and addr+7 < self.data_end) and \
                 not (addr >= self.stack_start  and addr+7 < self.stack_end):
             raise Fault(f'segfault: ld addr={addr:x}')
@@ -154,7 +151,8 @@ class Machine:
         else:
             raw = self.stack[addr - self.stack_start: addr+8 - self.stack_start]
 
-        self.reads.append(MemoryValue(addr, raw, True))
+        assert(self.mem_read is None)
+        self.mem_read = MemoryValue(addr, raw, True)
         return int.from_bytes(raw, byteorder='little', signed=True)
 
     def lbu(self, addr: int) -> int:
@@ -167,12 +165,11 @@ class Machine:
         else:
             raw = self.stack[addr - self.stack_start: addr+1 - self.stack_start]
 
-        self.reads.append(MemoryValue(addr, raw, False))
+        assert(self.mem_read is None)
+        self.mem_read = MemoryValue(addr, raw, False)
         return int.from_bytes(raw, byteorder='little', signed=False)
 
     def lhu(self, addr: int) -> int:
-        if not MISALIGNED_OKAY and (addr & 1) != 0:
-            raise Fault(f'bus error: lhu addr={addr:x}')
         if      not (addr >= self.data_start and addr+1 < self.data_end) and \
                 not (addr >= self.stack_start  and addr+1 < self.stack_end):
             raise Fault(f'segfault: lhu addr={addr:x}')
@@ -182,12 +179,11 @@ class Machine:
         else:
             raw = self.stack[addr - self.stack_start: addr+2 - self.stack_start]
 
-        self.reads.append(MemoryValue(addr, raw, False))
+        assert(self.mem_read is None)
+        self.mem_read = MemoryValue(addr, raw, False)
         return int.from_bytes(raw, byteorder='little', signed=False)
 
     def lwu(self, addr: int) -> int:
-        if not MISALIGNED_OKAY and (addr & 3) != 0:
-            raise Fault(f'bus error: lwu addr={addr:x}')
         if      not (addr >= self.data_start and addr+3 < self.data_end) and \
                 not (addr >= self.stack_start  and addr+3 < self.stack_end):
             raise Fault(f'segfault: lwu addr={addr:x}')
@@ -197,14 +193,15 @@ class Machine:
         else:
             raw = self.stack[addr - self.stack_start: addr+4 - self.stack_start]
 
-        self.reads.append(MemoryValue(addr, raw, False))
+        assert(self.mem_read is None)
+        self.mem_read = MemoryValue(addr, raw, False)
         return int.from_bytes(raw, byteorder='little', signed=False)
 
-    def store(self, addr: int, raw: bytes, init: bool = False) -> None:
+    def store(self, addr: int, raw: bytes, text_okay: bool = False, record: bool = True) -> None:
         size = len(raw)
         if      not (addr >= self.data_start  and addr+size <= self.data_end) and \
                 not (addr >= self.stack_start and addr+size <= self.stack_end) and \
-               (not init or \
+               (not text_okay or \
                 not (addr >= (self.text_start & ~4095) and addr+size <= self.text_end)):
             raise Fault(f'segfault: store addr={addr:x} size={size}')
 
@@ -215,9 +212,9 @@ class Machine:
             old = self.stack[addr - self.stack_start: addr+size - self.stack_start]
             self.stack[addr - self.stack_start: addr+size - self.stack_start] = raw
 
-        if not init:
-            self.writes.append(MemoryValue(addr, raw, True))
-            self.undos.append(MemoryValue(addr, old, True))
+        if record:
+            assert(self.mem_write is None)
+            self.mem_write = (MemoryValue(addr, old, True), MemoryValue(addr, raw, True))
 
     def sb(self, addr: int, value: int) -> None:
         if      not (addr >= self.data_start and addr < self.data_end) and \
@@ -234,12 +231,10 @@ class Machine:
             for (i, b) in enumerate(raw):
                 self.stack[addr+i - self.stack_start] = b
 
-        self.writes.append(MemoryValue(addr, raw, True))
-        self.undos.append(MemoryValue(addr, old, True))
+        assert(self.mem_write is None)
+        self.mem_write = (MemoryValue(addr, old, True), MemoryValue(addr, raw, True))
 
     def sh(self, addr: int, value: int) -> None:
-        if not MISALIGNED_OKAY and (addr & 1) != 0:
-            raise Fault(f'bus error: sh addr={addr:x}')
         if      not (addr >= self.data_start and addr+1 < self.data_end) and \
                 not (addr >= self.stack_start  and addr+1 < self.stack_end):
             raise Fault(f'segfault: sh addr={addr:x}')
@@ -254,12 +249,10 @@ class Machine:
             for (i, b) in enumerate(raw):
                 self.stack[addr+i - self.stack_start] = b
 
-        self.writes.append(MemoryValue(addr, raw, True))
-        self.undos.append(MemoryValue(addr, old, True))
+        assert(self.mem_write is None)
+        self.mem_write = (MemoryValue(addr, old, True), MemoryValue(addr, raw, True))
 
     def sw(self, addr: int, value: int) -> None:
-        if not MISALIGNED_OKAY and (addr & 3) != 0:
-            raise Fault(f'bus error: sw addr={addr:x}')
         if      not (addr >= self.data_start and addr+3 < self.data_end) and \
                 not (addr >= self.stack_start  and addr+3 < self.stack_end):
             raise Fault(f'segfault: sw addr={addr:x}')
@@ -274,12 +267,10 @@ class Machine:
             for (i, b) in enumerate(raw):
                 self.stack[addr+i - self.stack_start] = b
 
-        self.writes.append(MemoryValue(addr, raw, True))
-        self.undos.append(MemoryValue(addr, old, True))
+        assert(self.mem_write is None)
+        self.mem_write = (MemoryValue(addr, old, True), MemoryValue(addr, raw, True))
 
     def sd(self, addr: int, value: int) -> None:
-        if not MISALIGNED_OKAY and (addr & 7) != 0:
-            raise Fault(f'bus error: sd addr={addr:x}')
         if      not (addr >= self.data_start and addr+7 < self.data_end) and \
                 not (addr >= self.stack_start  and addr+7 < self.stack_end):
             raise Fault(f'segfault: sd addr={addr:x}')
@@ -294,12 +285,10 @@ class Machine:
             for (i, b) in enumerate(raw):
                 self.stack[addr+i - self.stack_start] = b
 
-        self.writes.append(MemoryValue(addr, raw, True))
-        self.undos.append(MemoryValue(addr, old, True))
+        assert(self.mem_write is None)
+        self.mem_write = (MemoryValue(addr, old, True), MemoryValue(addr, raw, True))
 
     def load_instruction(self, addr: int) -> int:
-        if not MISALIGNED_OKAY and (addr & 3) != 0:
-            raise Fault(f'bus error: load_instruction addr={addr:x}')
         if not (addr >= self.text_start and addr+3 < self.text_end):
             raise Fault(f'segfault: load_instruction addr={addr:x}')
 
@@ -309,26 +298,27 @@ class Machine:
     def get(self, reg: int) -> int:
         if reg != 0:
             dup = False
-            for elt in self.reads:
-                match elt:
-                    case RegisterValue(rs, _) if rs == reg:
-                        dup = True
+            for elt in self.reg_reads:
+                if elt.register == reg:
+                    dup = True
             if not dup:
-                self.reads.append(RegisterValue(reg, self.x[reg]))
+                self.reg_reads.append(RegisterValue(reg, self.x[reg]))
         return self.x[reg]
 
-    def set(self, reg: int, value: int) -> None:
+    def set(self, reg: int, value: int, record: bool = True) -> None:
         # zero register never changes
         if reg != 0:
-            self.writes.append(RegisterValue(reg, clip(value)))
-            self.undos.append(RegisterValue(reg, self.x[reg]))
+            if record:
+                assert(self.reg_write is None)
+                self.reg_write = (RegisterValue(reg, self.x[reg]), RegisterValue(reg, clip(value)))
             self.x[reg] = clip(value)
 
-    def set32(self, reg: int, value: int) -> None:
+    def set32(self, reg: int, value: int, record: bool = True) -> None:
         # zero register never changes
         if reg != 0:
-            self.writes.append(RegisterValue(reg, clip32(value)))
-            self.undos.append(RegisterValue(reg, self.x[reg]))
+            if record:
+                assert(self.reg_write is None)
+                self.reg_write = (RegisterValue(reg, self.x[reg]), RegisterValue(reg, clip32(value)))
             self.x[reg] = clip32(value)
 
     def set_pc(self, value: int) -> None:
@@ -337,32 +327,21 @@ class Machine:
         if self.pc & 3 != 0:
             raise Fault(f'bus error: pc addr={self.pc}')
 
-    def mark_function_start(self) -> None:
-        sp = self.get(r.index('sp'))
-        self.function_start = sp
-        self.stack_frames.append(sp)
-
-    def mark_function_end(self) -> None:
-        sp = self.get(r.index('sp'))
-        self.function_end = sp
-        self.stack_frames.pop()
-
     def gather_effects(self) -> 'Effects':
         e = Effects((self.old_pc, self.pc),
-            self.reads, self.writes, self.undos,
+            self.reg_reads, self.reg_write,
+            self.mem_read, self.mem_write,
             self.stdin_delta, self.stdout_delta,
-            self.other_message, self.terminate,
-            self.function_start, self.function_end)
-        self.reads = []
-        self.writes = []
-        self.undos = []
+            self.other_message, self.terminate)
+        self.reg_reads = []
+        self.reg_write = None
+        self.mem_read = None
+        self.mem_write = None
         self.stdin_delta = None
         self.stdout_delta = None
         self.other_message = None
         self.terminate = False
         self.stack_frame = None
-        self.function_start = None
-        self.function_end = None
         return e
 
     def text_label(self, addr: int, pc: int = 0) -> str:
@@ -425,24 +404,25 @@ Value: TypeAlias = MemoryValue | RegisterValue
 class Effects:
     # pc: old value, new value
     pc: tuple[int, int]
-    reads: list[Value]
-    writes: list[Value]
-    undos: list[Value]
+    reg_reads: list[RegisterValue]
+    reg_write: Optional[tuple[RegisterValue, RegisterValue]]
+    mem_read: Optional[MemoryValue]
+    mem_write: Optional[tuple[MemoryValue, MemoryValue]]
     stdin: Optional[bytes]
     stdout: Optional[bytes]
     other_message: Optional[str]
     terminate: bool
-    function_start: Optional[int] # sp at call time
-    function_end: Optional[int] # sp at ret time
+    function_start: Optional[int] = None # sp at call time
+    function_end: Optional[int] = None # sp at ret time
 
 def apply(m: Machine, e: Effects, is_forward: bool) -> None:
     m.set_pc(e.pc[0 if is_forward else 1])
-    for w in (e.writes if is_forward else e.undos):
-        match w:
-            case RegisterValue(rd, val):
-                m.set(rd, val)
-            case MemoryValue(address, val, _):
-                m.store(address, val)
+    if e.reg_write is not None:
+        write = e.reg_write[1 if is_forward else 0]
+        m.set(write.register, write.value, False)
+    if e.mem_write is not None:
+        store = e.mem_write[1 if is_forward else 0]
+        m.store(store.address, store.value, record=False)
     if e.stdout is not None:
         if is_forward:
             m.stdout += e.stdout
@@ -472,31 +452,35 @@ def set_most_recent_memory(m: Machine, sequence: list[tuple[Instruction, Effects
     (stack, data) = (False, False)
     for seq_i in range(seq_i, -1, -1):
         (instruction, e) = sequence[seq_i]
-        for elt in itertools.chain(e.reads, e.writes):
-            match elt:
-                case MemoryValue(address, value, _):
-                    if not stack and address >= m.stack_start:
-                        m.most_recent_stack = (address, len(value))
-                        if not data:
-                            m.most_recent_memory = address
-                        stack = True
-                    if not data and address < m.data_end:
-                        m.most_recent_data = (address, len(value))
-                        if not stack:
-                            m.most_recent_memory = address
-                        data = True
-                    if stack and data:
-                        break
+        mem = None
+        if e.mem_read is not None:
+            (address, value) = (e.mem_read.address, e.mem_read.value)
+        elif e.mem_write is not None:
+            (address, value) = (e.mem_write[1].address, e.mem_write[1].value)
+        else:
+            continue
+        
+        if not stack and address >= m.stack_start:
+            m.most_recent_stack = (address, len(value))
+            if not data:
+                m.most_recent_memory = address
+            stack = True
+        if not data and address < m.data_end:
+            m.most_recent_data = (address, len(value))
+            if not stack:
+                m.most_recent_memory = address
+            data = True
+        if stack and data:
+            break
 
 def report_effects(e: Effects) -> str:
     parts = []
-    for elt in e.writes:
-        match elt:
-            case RegisterValue(rd, val):
-                if r[rd] in ('ra', 'sp'):
-                    parts.append(f'{r[rd]} <- {hex(val)}')
-                else:
-                    parts.append(f'{r[rd]} <- {val}')
+    if e.reg_write is not None:
+        (rd, val) = (e.reg_write[1].register, e.reg_write[1].value)
+        if r[rd] in ('ra', 'sp'):
+            parts.append(f'{r[rd]} <- {hex(val)}')
+        else:
+            parts.append(f'{r[rd]} <- {val}')
     if e.pc[1] != e.pc[0] + 4:
         parts.append(f'pc <- {hex(e.pc[1])}')
     if e.other_message is not None:
@@ -606,6 +590,7 @@ def load_elf(filename: str) -> Machine:
     # read the section headers
     text_start, text_end = 0, 0
     data_start, data_end = 0, 0
+    bss_start, bss_end = 0, 0
     (strs_raw, syms_raw) = (b'', b'')
     seg_text, seg_data, seg_bss = -1, -1, -1
     for i in range(e_shnum):
@@ -647,6 +632,7 @@ def load_elf(filename: str) -> Machine:
     text_symbols = {}
     data_symbols = {}
     other_symbols = {}
+    other_symbols_by_name = {}
     global_pointer = 0
     symbol_size = 24
     for start in range(0, len(syms_raw), symbol_size):
@@ -682,6 +668,7 @@ def load_elf(filename: str) -> Machine:
             data_symbols[st_value] = name
         else:
             other_symbols[st_value] = name
+            other_symbols_by_name[name] = st_value
 
 
     # round to page boundaries at both ends
@@ -695,7 +682,7 @@ def load_elf(filename: str) -> Machine:
     #print(f'allocated {(memory_end - memory_start) // 1024}k address space from 0x{memory_start:x} to 0x{memory_end:x} (not including 4k stack)')
 
     # allocate address space
-    m = Machine(memory_start, memory_end, e_entry, text_start, text_end, text_symbols, data_start, data_end, data_symbols, other_symbols, global_pointer)
+    m = Machine(memory_start, memory_end, e_entry, text_start, text_end, text_symbols, data_start, data_end, data_symbols, other_symbols, other_symbols_by_name, global_pointer)
 
     # second pass--load the segments
     for i in range(e_phnum):
@@ -765,6 +752,9 @@ r = [
     'a6', 'a7', 's2', 's3', 's4', 's5', 's6', 's7',
     's8', 's9', 's10', 's11', 't3', 't4', 't5', 't6',
 ]
+a_regs = [r.index(elt) for elt in r if elt[0] == 'a']
+t_regs = [r.index(elt) for elt in r if elt[0] == 't' and elt[1] != 'p']
+s_regs = [r.index(elt) for elt in r if elt[0] == 's' and elt[1] != 'p']
 
 def decode(labels: Machine, address: int, inst: int) -> Instruction:
     # divide the instructions up according the main instruction opcode
@@ -857,8 +847,6 @@ def decode_jal(labels: Machine, address: int, inst: int, rd: int, imm: int) -> I
     def execute_jal(m: Machine) -> None:
         m.set(rd, m.pc + 4)
         m.set_pc(m.pc + imm)
-        if r[rd] == 'ra':
-            m.mark_function_start()
 
     dest = labels.text_label(address+imm)
     if r[rd] == 'zero':
@@ -879,10 +867,6 @@ def decode_jalr(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
         rs1_val = m.get(rs1)
         m.set(rd, m.pc + 4)
         m.set_pc((rs1_val + imm) & ~1)
-        if r[rd] == 'ra':
-            m.mark_function_start()
-        if r[rd] == 'zero' and imm == 0 and r[rs1] == 'ra':
-            m.mark_function_end()
 
     match (r[rd], imm, r[rs1]):
         case ('zero', 0, 'ra'):
@@ -1659,7 +1643,17 @@ def add_labels(m: Machine, instructions: dict[int, Instruction]) -> None:
             elif addr > pc:
                 instruction.fields[-1] = f'{target_label}f'
 
-def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, echo_in: bool) -> list[tuple[Instruction, Effects]]:
+next_value_number = 1
+
+def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, echo_in: bool, lint: bool) -> list[tuple[Instruction, Effects]]:
+    global next_value_number
+    context_stack: list[tuple[list[int], list[bool], int]] = []
+    entry_registers = [0] + [-1]*31
+    regs = list(entry_registers)
+    valid = [True, False, True] + [False]*29
+    entry_sp = m.x[2]
+    memory = {}
+
     sequence = []
     while True:
         # fetch the next instruction
@@ -1679,6 +1673,215 @@ def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, 
             sys.stdout.flush()
         if e.terminate:
             break
+
+        if not lint:
+            continue
+
+        # trace values
+        try:
+            # first check that all input registers are valid values
+            for elt in e.reg_reads:
+                x = elt.register
+                if not valid[x]:
+                    raise Fault(f'{r[x]} is uninitialized')
+
+            # next record register write
+            if e.reg_write is not None:
+                x = e.reg_write[1].register
+                valid[x] = True
+
+                # mv clones a value
+                if instruction.fields[0] == 'mv':
+                    assert(len(e.reg_reads) == 1)
+                    regs[x] = regs[e.reg_reads[0].register]
+                else:
+                    regs[x] = next_value_number
+                    next_value_number += 1
+
+                # sp must be aligned on 16-byte address
+                if x == 2 and m.x[x] & 0xf != 0:
+                    raise Fault(f'sp must be a multiple of 16')
+
+            match instruction.fields[0]:
+                case 'call' | 'jal' | 'jalr':
+                    # must use ra for return address
+                    match e.reg_write:
+                        case (_, RegisterValue(1, _)):
+                            pass
+                        case _:
+                            raise Fault('{instruction.fields[0]} did not use ra for return address')
+
+                    # must call named function
+                    if e.pc[1] not in m.text_symbols:
+                        raise Fault('{instruction.fields[0]} to unlabeled address')
+                    name = m.text_symbols[e.pc[1]]
+
+                    # push old register context and clone it as starting point
+                    context_stack.append( (entry_registers, valid, entry_sp) )
+                    valid = list(valid)
+                    entry_sp = m.x[2]
+                    e.function_start = m.x[2]
+
+                    # invalidate all t registers
+                    for x in t_regs:
+                        regs[x] = -1
+                        valid[x] = False
+
+                    arg_count = 8
+                    if name + '_args' in m.other_symbols_by_name:
+                        arg_count = m.other_symbols_by_name[name + '_args']
+
+                        # make sure func args are all valid values
+                        for x in a_regs[:arg_count]:
+                            if not valid[x]:
+                                raise Fault(f'argument in {r[x]} is uninitialized')
+                        for x in a_regs[arg_count:]:
+                            regs[x] = -1
+                            valid[x] = False
+                    else:
+                        # assume all a registers are function args
+                        for x in a_regs[:arg_count]:
+                            if regs[x] >= 0:
+                                valid[x] = True
+                            else:
+                                valid[x] = False
+
+                    # make sure all s registers have a number
+                    for x in s_regs:
+                        if regs[x] < 0:
+                            regs[x] = next_value_number
+                            next_value_number += 1
+                        valid[x] = True
+
+                    # record the registers at function entry time
+                    entry_registers = list(regs)
+
+                case 'ret':
+                    # ra, gp, and tp must match what they were at call time
+                    for x in [1, 3, 4]:
+                        if regs[x] != entry_registers[x]:
+                            print(f'{r[x]}: was {entry_registers[x]} now {regs[x]}')
+                            raise Fault(f'{r[x]} is not same value as when function called')
+
+                    # s registers must be same as at call time
+                    for x in s_regs:
+                        if regs[x] != entry_registers[x]:
+                            raise Fault(f'{r[x]} is not same value as when function called')
+
+                    # sp must have same address, but not necessarily same value
+                    if m.x[2] != entry_sp:
+                        raise Fault(f'sp is not same value as when function called')
+                    e.function_end = m.x[2]
+
+                    # pop previous function context
+                    (entry_registers, valid, entry_sp) = context_stack.pop()
+
+                    # invalidate t and a1+ registers
+                    for x in t_regs:
+                        regs[x] = -1
+                        valid[x] = False
+                    for x in a_regs[1:]:
+                        regs[x] = -1
+                        valid[x] = False
+
+                case 'sb' | 'sh' | 'sw' | 'sd':
+                    assert(e.mem_write is not None)
+                    (addr, size) = (e.mem_write[1].address, len(e.mem_write[1].value))
+
+                    # insist on aligned writes
+                    # partial register writes count as new values
+                    # since re-reading them does not restore a full register value
+                    rs2 = r.index(instruction.fields[1])
+                    match instruction.fields[0]:
+                        case 'sb':
+                            alignment = 0
+                            value_number = next_value_number
+                            next_value_number += 1
+                        case 'sh':
+                            alignment = 1
+                            value_number = next_value_number
+                            next_value_number += 1
+                        case 'sw':
+                            alignment = 3
+                            value_number = next_value_number
+                            next_value_number += 1
+                        case 'sd':
+                            alignment = 7
+                            value_number = regs[rs2]
+                    if addr & alignment != 0:
+                        raise Fault('unaligned write to memory')
+
+                    # record the memory write
+                    for address in range(addr, addr+size):
+                        memory[address] = (value_number, size)
+                    
+                case 'lb' | 'lh' | 'lw' | 'ld' | 'lbu' | 'lhu' | 'lwu':
+                    assert(e.mem_read is not None)
+                    (addr, size) = (e.mem_read.address, len(e.mem_read.value))
+
+                    # insist on aligned reads
+                    # partial register reads count as new values
+                    # since they do not restore a full register value
+                    rd = r.index(instruction.fields[1])
+                    match instruction.fields[0]:
+                        case 'lb' | 'lbu':
+                            alignment = 0
+                        case 'lh' | 'lhu':
+                            alignment = 1
+                        case 'lw' | 'lwu':
+                            alignment = 3
+                        case 'ld':
+                            alignment = 7
+                    if addr & alignment != 0:
+                        raise Fault('unaligned read from memory')
+
+                    # we accept two kinds of reads:
+                    # 1. a value that has not been written (recorded as a new number)
+                    # 2. a single value that is the same size as when written
+                    if addr in memory:
+                        value_number = memory[addr][0]
+                        for address in range(addr, addr+size):
+                            if address not in memory:
+                                raise Fault('reading data that was only partially written')
+                            (n, s) = memory[address]
+                            if n != value_number:
+                                raise Fault('reading data from multiple writes')
+                            if s != size:
+                                raise Fault('reading data with different size than when written')
+                    else:
+                        value_number = next_value_number
+                        next_value_number += 1
+                        for address in range(addr, addr+size):
+                            if address in memory:
+                                raise Fault('reading data that is only partially from a previous write')
+                    regs[rd] = value_number
+
+                case 'ecall':
+                    if e.mem_read is not None:
+                        # only allow bytes to the write syscall
+                        (addr, size) = (e.mem_read.address, len(e.mem_read.value))
+                        for address in range(addr, addr+size):
+                            if address in memory:
+                                (_, s) = memory[address]
+                                if s != 1:
+                                    raise Fault('write syscall on non-byte data')
+                    if e.mem_write is not None:
+                        (addr, size) = (e.mem_write[1].address, len(e.mem_write[1].value))
+                        for address in range(addr, addr+size):
+                            # do not allow overwrite of non-byte data
+                            if address in memory:
+                                (_, s) = memory[address]
+                                if s != 1:
+                                    raise Fault('read syscall overwriting non-byte data')
+
+                            # record data as individual bytes
+                            memory[address] = (next_value_number, 1)
+                            next_value_number += 1
+        except Fault as err:
+            e.other_message = err.msg
+            e.terminate = True
+            break
+
     return sequence
 
 def find_function_bounds(m: Machine, pc: int) -> tuple[int, int]:
@@ -2159,6 +2362,9 @@ def main() -> None:
         default='debug')
     parser.add_argument('-e', '--executable',
         default='a.out')
+    parser.add_argument('-l', '--lint',
+        choices=[True, False],
+        default=True)
     args = parser.parse_args()
 
     # load the program from disk and form the
@@ -2190,7 +2396,10 @@ def main() -> None:
     # trace the entire execution
     # for run mode, have pre_trace echo output as it goes
     # so inputs and outputs are correctly interleved
-    sequence = pre_trace(m, instructions, args.mode in ('run', 'debug'), args.mode == 'debug')
+    sequence = pre_trace(m, instructions,
+        args.mode in ('run', 'debug'),
+        args.mode == 'debug',
+        args.lint)
 
     if args.mode == 'trace':
         for (instruction, effects) in sequence:
