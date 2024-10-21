@@ -11,121 +11,152 @@ import sys
 import struct
 from typing import Callable, Optional, TypeAlias
 
-class Machine:
-    def __init__(self,
-            memory_start: int, memory_end: int, pc_start: int,
-            text_start: int, text_end: int, text_symbols: dict[int, str],
-            data_start: int, data_end: int, data_symbols: dict[int, str],
-            other_symbols: dict[int, str], other_symbols_by_name: dict[str, int],
-            global_pointer: int) -> None:
-        # allocate memory
-        assert(memory_start >= 4096)
-        assert(memory_end > memory_start)
-        assert(memory_start & 0xfff == 0)
-        assert(memory_end & 0xfff == 0)
-        self.memory_start = memory_start
-        self.memory_end = memory_end
-        self.pc_start = pc_start
-        self.text_start = text_start
-        self.text_end = text_end
-        self.text_symbols = text_symbols
-        self.data_start = data_start
-        self.data_end = data_end
-        self.data_symbols = data_symbols
-        self.other_symbols = other_symbols
-        self.other_symbols_by_name = other_symbols_by_name
-        self.global_pointer = global_pointer
-        self.stack_start = 0x1000000 - 4096
-        if self.stack_start < memory_end + 4096:
-            self.stack_start = memory_end + 4096
-        self.stack_end = self.stack_start + 4096
-        self.regions: list[tuple[int, bytes]] = []
+STACK_SIZE = 4096
 
-    def init_memory(self, addr: int, data: bytes) -> None:
-        self.regions.append( (addr, data) )
+class Segment:
+    def __init__(self, name: str, start: int, end: int, writeable: bool, executable: bool, init: bytes) -> None:
+        assert(start > 0 and end > start and (writeable != executable))
+        assert(len(init) <= end - start)
+        self.name = name
+        self.start = start
+        self.end = end
+        self.mem = bytearray()
+        self.init = init
+        self.writeable = writeable
+        self.executable = executable
+
+    def in_range(self, addr: int, size: int) -> bool:
+        return addr >= self.start and addr+size <= self.end
 
     def reset(self) -> None:
-        # allocate memory
-        self.stack = bytearray(4096)
-        self.memory = bytearray(self.memory_end - self.memory_start)
+        self.mem = bytearray(self.end - self.start)
+        self.mem[0:len(self.init)] = self.init
 
-        # load elf segments into memory
-        for (addr, raw) in self.regions:
-            self.store(addr, raw, text_okay=True, record=False)
+    def load(self, addr: int, size: int, effects: Optional['Effects'] = None) -> bytes:
+        assert(self.in_range(addr, size))
+        raw = self.mem[addr - self.start: addr+size - self.start]
+        if effects is not None:
+            assert(effects.mem_read is None)
+            effects.mem_read = MemoryValue(addr, raw)
+        return raw
+
+    def store(self, addr: int, raw: bytes, effects: Optional['Effects'] = None) -> None:
+        size = len(raw)
+        assert(self.in_range(addr, size))
+        if effects is not None:
+            assert(effects.mem_write is None)
+            old = self.mem[addr - self.start: addr+size - self.start]
+            effects.mem_write = (MemoryValue(addr, old), MemoryValue(addr, raw))
+        self.mem[addr - self.start: addr+size - self.start] = raw
+
+class Machine:
+    def __init__(self,
+            segments: list[Segment],
+            pc_start: int,
+            global_pointer: int,
+            address_symbols: dict[int, str],
+            other_symbols: dict[str, int]) -> None:
+        self.segments = segments
+        self.pc_start = pc_start
+        self.global_pointer = global_pointer
+        self.address_symbols = address_symbols
+        self.other_symbols = other_symbols
+        self.stack_start = 0x100000 - STACK_SIZE
+        for segment in segments:
+            if segment.end + STACK_SIZE >= self.stack_start:
+                self.stack_start = (segment.end + STACK_SIZE*2 - 1) & 4095
+        self.stack_end = self.stack_start + STACK_SIZE
+        self.data_start = self.stack_end - 8
+        self.data_end = 0
+        self.text_start = self.stack_end
+        self.text_end = 0
+        for segment in segments:
+            if segment.executable:
+                self.text_start = min(self.text_start, segment.start)
+                self.text_end = max(self.text_end, segment.end)
+            else:
+                self.data_start = min(self.data_start, segment.start)
+                self.data_end = max(self.data_end, segment.end)
+        if self.data_end == 0:
+            self.data_end = self.data_start
+        self.segments.append(Segment('stack', self.stack_start, self.stack_end, True, False, b''))
+
+    def reset(self) -> None:
+        for segment in self.segments:
+            segment.reset()
 
         # set up cpu state
         self.x = [0] * 32
-        self.pc = self.pc_start
         self.x[2] = self.stack_end
+        self.pc = self.pc_start
 
         # set up tracing
         self.stdout = bytearray()
         self.stdin = bytearray()
         self.stack_frames: list[int] = []
+        self.effects: Optional['Effects'] = None
 
-        self.effects = Effects(
-            pc = (self.pc, self.pc+4),
-            reg_reads = [],
-            reg_write = None,
-            mem_read = None,
-            mem_write = None,
-            stdin = None,
-            stdout = None,
-            other_message = None,
-            terminate = False,
-            function_start = None,
-            function_end = None)
-
-        self.most_recent_memory = self.data_start if self.data_start > 0 else self.stack_end - 8
+    def set_most_recent_memory(self, sequence: list[tuple['Instruction', 'Effects']], seq_i: int) -> None:
+        self.most_recent_memory = self.data_start if self.data_start > 0 else self.stack_end-8
         self.most_recent_data = (self.data_start, 0)
-        self.most_recent_stack = (self.stack_end, 0)
+        self.most_recent_stack = (self.stack_end-8, 0)
+        (stack, data) = (False, False)
+        for seq_i in range(seq_i, -1, -1):
+            (instruction, e) = sequence[seq_i]
+            if e.mem_read is not None:
+                (address, value) = (e.mem_read.address, e.mem_read.value)
+            elif e.mem_write is not None:
+                (address, value) = (e.mem_write[1].address, e.mem_write[1].value)
+            else:
+                continue
+            
+            if not stack and address >= self.stack_start:
+                self.most_recent_stack = (address, len(value))
+                if not data:
+                    self.most_recent_memory = address
+                stack = True
+            if not data and address < self.data_end:
+                self.most_recent_data = (address, len(value))
+                if not stack:
+                    self.most_recent_memory = address
+                data = True
+            if stack and data:
+                break
 
-    def load(self, addr: int, size: int, record: bool = True) -> bytes:
-        if      not (addr >= self.data_start  and addr+size <= self.data_end) and \
-                not (addr >= self.stack_start and addr+size <= self.stack_end):
-            raise Fault(f'segfault: load addr={addr:x} size={size}')
-        if addr < self.memory_end:
-            raw = self.memory[addr - self.memory_start: addr+size - self.memory_start]
-        else:
-            raw = self.stack[addr - self.stack_start: addr+size - self.stack_start]
+    def load(self, addr: int, size: int) -> bytes:
+        for segment in self.segments:
+            if segment.in_range(addr, size):
+                return segment.load(addr, size, self.effects)
+        raise Fault(f'segfault: load addr={addr:x} size={size}')
 
-        if record:
-            assert(self.effects.mem_read is None)
-            self.effects.mem_read = MemoryValue(addr, raw, False)
-        return raw
+    def is_valid_addr(self, addr: int) -> bool:
+        for segment in self.segments:
+            if segment.in_range(addr, 1):
+                return True
+        return False
 
-    def load_int(self, addr: int, size: int, signed: bool = True, record: bool = True) -> int:
-        raw = self.load(addr, size, record)
+    def load_int(self, addr: int, size: int, signed: bool = True) -> int:
+        raw = self.load(addr, size)
         return int.from_bytes(raw, byteorder='little', signed=signed)
 
-    def store(self, addr: int, raw: bytes, text_okay: bool = False, record: bool = True) -> None:
-        size = len(raw)
-        if      not (addr >= self.data_start  and addr+size <= self.data_end) and \
-                not (addr >= self.stack_start and addr+size <= self.stack_end) and \
-               (not text_okay or \
-                not (addr >= (self.text_start & ~4095) and addr+size <= self.text_end)):
-            raise Fault(f'segfault: store addr={addr:x} size={size}')
-
-        if addr < self.memory_end:
-            old = self.memory[addr - self.memory_start: addr+size - self.memory_start]
-            self.memory[addr - self.memory_start: addr+size - self.memory_start] = raw
-        else:
-            old = self.stack[addr - self.stack_start: addr+size - self.stack_start]
-            self.stack[addr - self.stack_start: addr+size - self.stack_start] = raw
-
-        if record:
-            assert(self.effects.mem_write is None)
-            self.effects.mem_write = (MemoryValue(addr, old, True), MemoryValue(addr, raw, True))
-
     def load_instruction(self, addr: int) -> int:
-        if not (addr >= self.text_start and addr+3 < self.text_end):
-            raise Fault(f'segfault: load_instruction addr={addr:x}')
+        size = 4
+        for segment in self.segments:
+            if segment.in_range(addr, size) and segment.executable:
+                raw = segment.load(addr, size, None)
+                return int.from_bytes(raw, byteorder='little', signed=True)
+        raise Fault(f'segfault: instruction fetch addr={addr:x} size={size}')
 
-        raw = self.memory[addr - self.memory_start: addr+4 - self.memory_start]
-        return int.from_bytes(raw, byteorder='little', signed=True)
+    def store(self, addr: int, raw: bytes) -> None:
+        size = len(raw)
+        for segment in self.segments:
+            if segment.in_range(addr, len(raw)) and segment.writeable:
+                segment.store(addr, raw, self.effects)
+                return
+        raise Fault(f'segfault: store addr={addr:x} size={size}')
 
     def get(self, reg: int) -> int:
-        if reg != 0:
+        if reg != 0 and self.effects is not None:
             dup = False
             for elt in self.effects.reg_reads:
                 if elt.register == reg:
@@ -134,18 +165,18 @@ class Machine:
                 self.effects.reg_reads.append(RegisterValue(reg, self.x[reg]))
         return self.x[reg]
 
-    def set(self, reg: int, value: int, record: bool = True) -> None:
+    def set(self, reg: int, value: int) -> None:
         # zero register never changes
         if reg != 0:
-            if record:
+            if self.effects is not None:
                 assert(self.effects.reg_write is None)
                 self.effects.reg_write = (RegisterValue(reg, self.x[reg]), RegisterValue(reg, clip(value)))
             self.x[reg] = clip(value)
 
-    def set32(self, reg: int, value: int, record: bool = True) -> None:
+    def set32(self, reg: int, value: int) -> None:
         # zero register never changes
         if reg != 0:
-            if record:
+            if self.effects is not None:
                 assert(self.effects.reg_write is None)
                 self.effects.reg_write = (RegisterValue(reg, self.x[reg]), RegisterValue(reg, clip32(value)))
             self.x[reg] = clip32(value)
@@ -155,39 +186,14 @@ class Machine:
         self.pc = clip(value)
         if self.pc & 3 != 0:
             raise Fault(f'bus error: pc addr={self.pc}')
-        self.effects.pc = (old_pc, self.pc)
+        if self.effects is not None:
+            self.effects.pc = (old_pc, self.pc)
 
-    def gather_effects(self) -> 'Effects':
-        e = self.effects
-        self.effects = Effects()
-        return e
-
-    def text_label(self, addr: int, pc: int = 0) -> str:
-        if addr in self.text_symbols:
-            return f'{self.text_symbols[addr]}/{hex(addr)}'
+    def address_label(self, addr: int) -> str:
+        if addr in self.address_symbols:
+            return self.address_symbols[addr]
         else:
             return str(addr)
-
-    def data_label(self, addr: int) -> str:
-        if addr in self.data_symbols:
-            return f'{self.data_symbols[addr]}/{hex(addr)}'
-        else:
-            return hex(addr)
-
-    def misc_label(self, n: int) -> str:
-        return str(n)
-        if n in self.other_symbols:
-            return f'{self.other_symbols[n]}/{n}'
-        else:
-            return str(n)
-
-    def addr(self, addr: int) -> str:
-        if addr in self.text_symbols:
-            return f'{self.text_symbols[addr]} ({hex(addr)})'
-        elif addr in self.data_symbols:
-            return f'{self.data_symbols[addr]} ({hex(addr)})'
-        else:
-            return hex(addr)
 
 @dataclasses.dataclass
 class Instruction:
@@ -209,7 +215,6 @@ class Fault(Exception):
 class MemoryValue:
     address: int
     value: bytes
-    signed: bool
 
 @dataclasses.dataclass
 class RegisterValue:
@@ -237,10 +242,10 @@ def apply(m: Machine, e: Effects, is_forward: bool) -> None:
     m.set_pc(e.pc[0 if is_forward else 1])
     if e.reg_write is not None:
         write = e.reg_write[1 if is_forward else 0]
-        m.set(write.register, write.value, False)
+        m.set(write.register, write.value)
     if e.mem_write is not None:
         store = e.mem_write[1 if is_forward else 0]
-        m.store(store.address, store.value, record=False)
+        m.store(store.address, store.value)
     if e.stdout is not None:
         if is_forward:
             m.stdout += e.stdout
@@ -262,33 +267,6 @@ def apply(m: Machine, e: Effects, is_forward: bool) -> None:
             m.stack_frames.pop()
         else:
             m.stack_frames.append(e.function_end)
-
-def set_most_recent_memory(m: Machine, sequence: list[tuple[Instruction, Effects]], seq_i: int) -> None:
-    m.most_recent_memory = m.data_start if m.data_start > 0 else m.stack_end-8
-    m.most_recent_data = (m.data_start, 0)
-    m.most_recent_stack = (m.stack_end-8, 0)
-    (stack, data) = (False, False)
-    for seq_i in range(seq_i, -1, -1):
-        (instruction, e) = sequence[seq_i]
-        if e.mem_read is not None:
-            (address, value) = (e.mem_read.address, e.mem_read.value)
-        elif e.mem_write is not None:
-            (address, value) = (e.mem_write[1].address, e.mem_write[1].value)
-        else:
-            continue
-        
-        if not stack and address >= m.stack_start:
-            m.most_recent_stack = (address, len(value))
-            if not data:
-                m.most_recent_memory = address
-            stack = True
-        if not data and address < m.data_end:
-            m.most_recent_data = (address, len(value))
-            if not stack:
-                m.most_recent_memory = address
-            data = True
-        if stack and data:
-            break
 
 def report_effects(e: Effects) -> str:
     parts = []
@@ -368,8 +346,8 @@ def load_elf(filename: str) -> Machine:
     assert(e_phentsize == 0x38)             # size of program header entry
     assert(e_phnum >= 1)                    # number of program header entries
 
-    # first pass--find how big the VM footprint is
-    memory_start, memory_end = 0, 0
+    # get the loadable segments
+    chunks = []
     for i in range(e_phnum):
         # unpack the program header
         #print('unpacking program header')
@@ -381,11 +359,8 @@ def load_elf(filename: str) -> Machine:
         if p_type != 1:
             continue
         assert(p_vaddr >= 0)
-        #print(f'found section at {p_vaddr} + {p_memsz}')
-        if memory_end == 0 or p_vaddr < memory_start:
-            memory_start = p_vaddr
-        if p_vaddr + p_memsz > memory_end:
-            memory_end = p_vaddr + p_memsz
+        chunk = (p_vaddr, raw[p_offset: p_offset+p_filesz])
+        chunks.append(chunk)
 
     # get the section header strings
     i = e_shstrndx
@@ -405,11 +380,8 @@ def load_elf(filename: str) -> Machine:
             start = i+1
 
     # read the section headers
-    text_start, text_end = 0, 0
-    data_start, data_end = 0, 0
-    bss_start, bss_end = 0, 0
     (strs_raw, syms_raw) = (b'', b'')
-    seg_text, seg_data, seg_bss = -1, -1, -1
+    segments = []
     for i in range(e_shnum):
         # unpack the section header
         start = e_shoff + e_shentsize*i
@@ -419,18 +391,23 @@ def load_elf(filename: str) -> Machine:
         ) = struct.unpack('<2I4Q2I2Q', raw[start:start+e_shentsize])
 
         #print(f'{i}: name: {sh_strs[sh_name]}. type: {hex(sh_type)}')
-        if sh_strs[sh_name] == '.text' and sh_flags & 4 != 0 and sh_type == 1:
-            assert(text_start == 0 and text_end == 0)
-            seg_text = i
-            text_start, text_end = sh_addr, sh_addr + sh_size
+        # watch out for features we do not support
+        assert(sh_type not in (0x4, 0x5, 0x6, 0x9, 0xb, 0xe, 0xf, 0x10, 0x11))
 
-        elif sh_strs[sh_name] == '.data':
-            seg_data = i
-            data_start, data_end = sh_addr, sh_addr + sh_size
-
-        elif sh_strs[sh_name] == '.bss':
-            seg_bss = i
-            bss_start, bss_end = sh_addr, sh_addr + sh_size
+        if sh_type in (1, 8) and sh_flags&0x2 != 0:
+            # in-memory section; see if we have loadable data
+            init = b''
+            for (p_vaddr, seg_raw) in chunks:
+                if sh_addr <= p_vaddr < sh_addr+sh_size:
+                    init = seg_raw[p_vaddr-sh_addr: p_vaddr-sh_addr + sh_size]
+                elif p_vaddr <= sh_addr < p_vaddr+len(seg_raw):
+                    init = seg_raw[sh_addr-p_vaddr: sh_addr-p_vaddr + sh_size]
+            segments.append(Segment(sh_strs[sh_name],
+                                    sh_addr,
+                                    sh_addr+sh_size, 
+                                    sh_flags&0x1 != 0,
+                                    sh_flags&0x4 != 0,
+                                    init))
 
         elif sh_strs[sh_name] == '.strtab' and sh_type == 3:
             strs_raw = raw[sh_offset:sh_offset + sh_size]
@@ -438,18 +415,12 @@ def load_elf(filename: str) -> Machine:
         elif sh_strs[sh_name] == '.symtab' and sh_type == 2:
             syms_raw = raw[sh_offset:sh_offset + sh_size]
 
-    if bss_start > 0 and bss_end > data_end:
-        data_end = bss_end
-
     assert(len(strs_raw) > 0)
     assert(len(syms_raw) > 0)
-    assert(seg_text >= 0)
 
     # parse the symbol table
-    text_symbols = {}
-    data_symbols = {}
+    address_symbols = {}
     other_symbols = {}
-    other_symbols_by_name = {}
     global_pointer = 0
     symbol_size = 24
     for start in range(0, len(syms_raw), symbol_size):
@@ -477,47 +448,13 @@ def load_elf(filename: str) -> Machine:
             continue
 
         # sort into text, data/bss, and other symbols
-        if st_shndx == seg_text:
-            text_symbols[st_value] = name
-        elif st_shndx == seg_data and seg_data >= 0:
-            data_symbols[st_value] = name
-        elif st_shndx == seg_bss and seg_bss >= 0:
-            data_symbols[st_value] = name
+        if st_shndx > 0:
+            address_symbols[st_value] = name
         else:
-            other_symbols[st_value] = name
-            other_symbols_by_name[name] = st_value
-
-
-    # round to page boundaries at both ends
-    memory_start &= ~4095
-    memory_end = (memory_end + 4095) & ~4095
-
-    assert(text_start != 0 and text_end != 0)
-    assert(text_start <= e_entry < text_end)
-
-    # allocate a page of stack
-    #print(f'allocated {(memory_end - memory_start) // 1024}k address space from 0x{memory_start:x} to 0x{memory_end:x} (not including 4k stack)')
+            other_symbols[name] = st_value
 
     # allocate address space
-    m = Machine(memory_start, memory_end, e_entry, text_start, text_end, text_symbols, data_start, data_end, data_symbols, other_symbols, other_symbols_by_name, global_pointer)
-
-    # second pass--load the segments
-    for i in range(e_phnum):
-        # unpack the program header
-        #print(f'unpacking program header {i+1}')
-        start = e_phoff + e_phentsize*i
-        (
-            p_type, p_flags, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align
-        ) = struct.unpack('<2I6Q', raw[start:start+e_phentsize])
-
-        if p_type != 1:
-            #print('    skipping non-loadable segment')
-            continue
-        #print(f'    loading segment from offset 0x{p_offset:x} with size 0x{p_filesz:x}')
-        #print(f'    into virtual address 0x{p_vaddr:x} with size 0x{p_memsz:x}')
-
-        m.init_memory(p_vaddr, raw[p_offset:p_offset+p_filesz])
-
+    m = Machine(segments, e_entry, global_pointer, address_symbols, other_symbols)
     m.reset()
     return m
 
@@ -639,6 +576,7 @@ def decode(labels: Machine, address: int, inst: int) -> Instruction:
             elif inst == 0x00100073:
                 # handle ebreak here--exit
                 def execute_ebreak(m: Machine) -> None:
+                    assert(m.effects is not None)
                     m.effects.other_message = 'ebreak'
                     m.effects.terminate = True
 
@@ -665,7 +603,7 @@ def decode_jal(labels: Machine, address: int, inst: int, rd: int, imm: int) -> I
         m.set(rd, m.pc + 4)
         m.set_pc(m.pc + imm)
 
-    dest = labels.text_label(address+imm)
+    dest = labels.address_label(address+imm)
     if r[rd] == 'zero':
         fields = ['j', dest]
     elif r[rd] == 'ra':
@@ -707,7 +645,7 @@ def decode_branches(labels: Machine, address: int, inst: int, funct3: int, rs1: 
                 else:
                     m.set_pc(m.pc + 4)
 
-            dest = labels.text_label(address+imm, pc=address)
+            dest = labels.address_label(address+imm)
             if r[rs1] == 'zero':
                 fields = ['beqz', r[rs2], dest]
             elif r[rs2] == 'zero':
@@ -725,7 +663,7 @@ def decode_branches(labels: Machine, address: int, inst: int, funct3: int, rs1: 
                 else:
                     m.set_pc(m.pc + 4)
 
-            dest = labels.text_label(address+imm, pc=address)
+            dest = labels.address_label(address+imm)
             if r[rs1] == 'zero':
                 fields = ['bnez', r[rs2], dest]
             elif r[rs2] == 'zero':
@@ -742,7 +680,7 @@ def decode_branches(labels: Machine, address: int, inst: int, funct3: int, rs1: 
                 else:
                     m.set_pc(m.pc + 4)
 
-            dest = labels.text_label(address+imm, pc=address)
+            dest = labels.address_label(address+imm)
             if r[rs1] == 'zero':
                 fields=['bgtz', r[rs2], dest]
             elif r[rs2] == 'zero':
@@ -760,7 +698,7 @@ def decode_branches(labels: Machine, address: int, inst: int, funct3: int, rs1: 
                 else:
                     m.set_pc(m.pc + 4)
 
-            dest = labels.text_label(address+imm, pc=address)
+            dest = labels.address_label(address+imm)
             if r[rs1] == 'zero':
                 fields=['blez', r[rs2], dest]
             elif r[rs2] == 'zero':
@@ -778,7 +716,7 @@ def decode_branches(labels: Machine, address: int, inst: int, funct3: int, rs1: 
                 else:
                     m.set_pc(m.pc + 4)
 
-            dest = labels.text_label(address+imm, pc=address)
+            dest = labels.address_label(address+imm)
 
             return Instruction(address, inst, ['bltu', r[rs1], r[rs2], dest], execute_bltu,
                 static_target=address+imm)
@@ -790,7 +728,7 @@ def decode_branches(labels: Machine, address: int, inst: int, funct3: int, rs1: 
                 else:
                     m.set_pc(m.pc + 4)
 
-            dest = labels.text_label(address+imm, pc=address)
+            dest = labels.address_label(address+imm)
 
             return Instruction(address, inst, ['bgeu', r[rs1], r[rs2], dest], execute_bgeu,
                 static_target=address+imm)
@@ -938,11 +876,11 @@ def decode_alu_imm(labels: Machine, address: int, inst: int, funct3: int, rd: in
                 case ('zero', 'zero', 0):
                     fields=['nop']
                 case (_, 'zero', _):
-                    fields=['li', r[rd], labels.misc_label(imm)]
+                    fields=['li', r[rd], str(imm)]
                 case (_, _, 0):
                     fields=['mv', r[rd], r[rs1]]
                 case (_, 'gp', _) if r[rd] != 'gp':
-                    fields=['la', r[rd], labels.data_label(labels.global_pointer + imm)]
+                    fields=['la', r[rd], labels.address_label(labels.global_pointer + imm)]
                 case _:
                     fields=['addi', r[rd], r[rs1], str(imm)]
 
@@ -1036,7 +974,7 @@ def decode_alu_imm_w(labels: Machine, address: int, inst: int, funct3: int, rd: 
                 case ('zero', 'zero', 0):
                     fields=['nop']
                 case (_, 'zero', _):
-                    fields=['li', r[rd], labels.misc_label(imm)]
+                    fields=['li', r[rd], str(imm)]
                 case _:
                     fields=['addiw', r[rd], r[rs1], str(imm)]
 
@@ -1323,6 +1261,7 @@ def decode_alu_w(address: int, inst: int, funct3: int, rd: int, rs1: int, rs2: i
 
 def decode_ecall(address: int, inst: int) -> Instruction:
     def execute_ecall(m: Machine) -> None:
+        assert(m.effects is not None)
         if m.get(17) == 63:
             # read system call
             m.effects.other_message = f'read({m.get(10)}, {hex(m.get(11))}, {m.get(12)})'
@@ -1374,25 +1313,19 @@ def pair_instructions(m: Machine, instructions: dict[int, Instruction]) -> None:
                 case (Instruction(fields=['auipc', rd0, imm0]),
                       Instruction(fields=['addi', rd, rs1, imm])) if rd0 == rd and rs1 == rd:
                     addr = pc + int(imm0) + int(imm)
-                    if m.text_start <= addr <= m.text_end:
-                        sym = m.text_label(addr, pc=pc)
-                    else:
-                        sym = m.data_label(addr)
+                    sym = m.address_label(addr)
                     instruction.fields = ['auipc', rd0, imm0, f'[la {rd0}, {sym}]']
                 case (Instruction(fields=['auipc', rd0, imm0]),
                       Instruction(fields=['jalr', rd, imm, '()', rs1])) if rd0 == rd and rs1 == rd:
                     addr = pc + int(imm0) + int(imm)
-                    if m.text_start <= addr <= m.text_end:
-                        sym = m.text_label(addr, pc=pc)
-                    else:
-                        sym = m.data_label(addr)
+                    sym = m.address_label(addr)
                     instruction.fields = ['auipc', rd0, imm0, f'[call {sym}]']
 
 def add_labels(m: Machine, instructions: dict[int, Instruction]) -> None:
     # add labels from the symbol table and note branch targets
     for (pc, instruction) in instructions.items():
-        if pc in m.text_symbols:
-            instruction.label = m.text_symbols[pc]
+        if pc in m.address_symbols:
+            instruction.label = m.address_symbols[pc]
         if instruction.static_target is not None:
             instructions[instruction.static_target].is_target = True
 
@@ -1465,12 +1398,12 @@ def add_labels(m: Machine, instructions: dict[int, Instruction]) -> None:
             elif addr > pc:
                 instruction.fields[-1] = f'{target_label}f'
 
-next_value_number = 1
+next_value_number = 32
 
 def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, echo_in: bool, lint: bool) -> list[tuple[Instruction, Effects]]:
     global next_value_number
     context_stack: list[tuple[list[int], list[bool], int]] = []
-    entry_registers = [0] + [-1]*31
+    entry_registers = list(range(32))
     regs = list(entry_registers)
     valid = [True, False, True] + [False]*29
     entry_sp = m.x[2]
@@ -1480,12 +1413,14 @@ def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, 
     while True:
         # fetch the next instruction
         instruction = instructions[m.pc]
+        e = Effects()
+        m.effects = e
         try:
             instruction.execute(m)
         except Fault as err:
-            m.effects.other_message = err.msg
-            m.effects.terminate = True
-        e = m.gather_effects()
+            e.other_message = err.msg
+            e.terminate = True
+        m.effects = None
         sequence.append( (instruction, e) )
         if echo_out and e.stdout is not None:
             sys.stdout.buffer.write(e.stdout)
@@ -1534,9 +1469,9 @@ def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, 
                             raise Fault('{instruction.fields[0]} did not use ra for return address')
 
                     # must call named function
-                    if e.pc[1] not in m.text_symbols:
+                    if e.pc[1] not in m.address_symbols:
                         raise Fault('{instruction.fields[0]} to unlabeled address')
-                    name = m.text_symbols[e.pc[1]]
+                    name = m.address_symbols[e.pc[1]]
 
                     # push old register context and clone it as starting point
                     context_stack.append( (entry_registers, valid, entry_sp) )
@@ -1550,8 +1485,8 @@ def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, 
                         valid[x] = False
 
                     arg_count = 8
-                    if name + '_args' in m.other_symbols_by_name:
-                        arg_count = m.other_symbols_by_name[name + '_args']
+                    if name + '_args' in m.other_symbols:
+                        arg_count = m.other_symbols[name + '_args']
 
                         # make sure func args are all valid values
                         for x in a_regs[:arg_count]:
@@ -1709,10 +1644,10 @@ def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, 
 def find_function_bounds(m: Machine, pc: int) -> tuple[int, int]:
     assert(pc >= m.text_start and pc < m.text_end and pc%4 == 0)
     for start in range(pc, m.text_start-4, -4):
-        if start in m.text_symbols:
+        if start in m.address_symbols:
             break
     for end in range(pc+4, m.text_end, 4):
-        if end in m.text_symbols:
+        if end in m.address_symbols:
             break
     return (start, end)
 
@@ -1803,7 +1738,7 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
     curses.init_pair(15, 103, 16)
     curses.init_pair(16, 139, 16)
     data_color_pairs = [10, 11, 12, 13, 14, 15, 16]
-    data_colors = list(zip(sorted(m.data_symbols.keys()), itertools.cycle(data_color_pairs)))
+    data_colors = list(zip(sorted(m.address_symbols.keys()), itertools.cycle(data_color_pairs)))
 
     # just in case there is no data segment
     if len(data_colors) == 0:
@@ -1998,12 +1933,16 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
                             hex_s += f'\033{color:02}'
                             ascii_s += f'\033{color:02}'
 
-                        n = m.load_int(j, 1, signed=False, record=False)
-                        hex_s += f'{n:02x}'
-                        if n >= ord(' ') and n <= ord('~'):
-                            ascii_s += chr(n)
+                        if m.is_valid_addr(j):
+                            n = m.load_int(j, 1, signed=False)
+                            hex_s += f'{n:02x}'
+                            if n >= ord(' ') and n <= ord('~'):
+                                ascii_s += chr(n)
+                            else:
+                                ascii_s += '·'
                         else:
-                            ascii_s += '·'
+                            hex_s += '  '
+                            ascii_s += ' '
                     else:
                         if color != 0:
                             color = 0
@@ -2080,7 +2019,6 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
         status_line = f' Step {seq_i+1}/{len(sequence)} PC:{pc:x} '[:size_x-4]
         stdscr.addstr(size_y-1, 2, status_line)
         stdscr.refresh()
-        m.gather_effects()
 
     resize()
     draw()
@@ -2093,13 +2031,13 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
         if key == curses.KEY_RIGHT and seq_i+1 < len(sequence):
             apply(m, sequence[seq_i][1], True)
             seq_i += 1
-            set_most_recent_memory(m, sequence, seq_i)
+            m.set_most_recent_memory(sequence, seq_i)
             pc = sequence[seq_i][0].address
             cursor_addr = pc
         elif key == curses.KEY_LEFT and seq_i > 0:
             seq_i -= 1
             apply(m, sequence[seq_i][1], False)
-            set_most_recent_memory(m, sequence, seq_i)
+            m.set_most_recent_memory(sequence, seq_i)
             pc = sequence[seq_i][0].address
             cursor_addr = pc
         elif key == curses.KEY_UP and cursor_addr-4 >= m.text_start:
@@ -2122,7 +2060,7 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
                     for seq_i in range(seq_i, peek):
                         apply(m, sequence[seq_i][1], True)
                     seq_i += 1
-                    set_most_recent_memory(m, sequence, seq_i)
+                    m.set_most_recent_memory(sequence, seq_i)
                     pc = sequence[seq_i][0].address
                     cursor_addr = pc
                     break
@@ -2133,7 +2071,7 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
                     # play the sequence backward to this point
                     for seq_i in range(seq_i-1, peek-1, -1):
                         apply(m, sequence[seq_i][1], False)
-                    set_most_recent_memory(m, sequence, seq_i)
+                    m.set_most_recent_memory(sequence, seq_i)
                     pc = sequence[seq_i][0].address
                     cursor_addr = pc
                     break
@@ -2151,7 +2089,7 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
                     apply(m, sequence[seq_i][1], False)
                 if func_start <= pc < func_end and (seq_i == 0 or sequence[seq_i-1][0].fields[0] == 'call'):
                     break
-            set_most_recent_memory(m, sequence, seq_i)
+            m.set_most_recent_memory(sequence, seq_i)
         elif key == curses.KEY_END:
             # find the next return (or end of program) from current function
             (func_start, func_end) = find_function_bounds(m, pc)
@@ -2161,7 +2099,7 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
                 if func_start <= pc < func_end and sequence[seq_i][0].fields[0] == 'ret':
                     break
                 apply(m, sequence[seq_i][1], True)
-            set_most_recent_memory(m, sequence, seq_i)
+            m.set_most_recent_memory(sequence, seq_i)
 
         elif key == curses.KEY_RESIZE:
             resize()
@@ -2211,12 +2149,13 @@ def main() -> None:
     if args.mode == 'dasm':
         for pc in range(m.text_start, m.text_end, 4):
             instruction = instructions[pc]
-            disasm = f'{instruction.fields[0]:<8}' + ', '.join(instruction.fields[1:])
-            if instruction.label is None:
-                addr_part = ''
-            else:
-                addr_part = instruction.label + ':'
-            line = f'{addr_part:<20}{disasm:<48}'
+            line = render_line(instruction, None)[0]
+            #disasm = f'{instruction.fields[0]:<8}' + ', '.join(instruction.fields[1:])
+            #if instruction.label is None:
+            #    addr_part = ''
+            #else:
+            #    addr_part = instruction.label + ':'
+            #line = f'{addr_part:<20}{disasm:<48}'
             print(line)
         return
 
@@ -2236,7 +2175,7 @@ def main() -> None:
     if args.mode == 'debug':
         # reload to reset memory state
         m.reset()
-        set_most_recent_memory(m, sequence, 0)
+        m.set_most_recent_memory(sequence, 0)
         ui(m, instructions, sequence)
 
     # should have ended with exit(0)
