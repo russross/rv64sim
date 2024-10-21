@@ -63,139 +63,40 @@ class Machine:
         self.stdin = bytearray()
         self.stack_frames: list[int] = []
 
-        self.old_pc = 0
-        self.reg_reads: list[RegisterValue] = []
-        self.reg_write: Optional[tuple[RegisterValue, RegisterValue]] = None
-        self.mem_read: Optional[MemoryValue] = None
-        self.mem_write: Optional[tuple[MemoryValue, MemoryValue]] = None
-        self.stdin_delta: Optional[bytes] = None
-        self.stdout_delta: Optional[bytes] = None
-        self.other_message: Optional[str] = None
-        self.terminate = False
+        self.effects = Effects(
+            pc = (self.pc, self.pc+4),
+            reg_reads = [],
+            reg_write = None,
+            mem_read = None,
+            mem_write = None,
+            stdin = None,
+            stdout = None,
+            other_message = None,
+            terminate = False,
+            function_start = None,
+            function_end = None)
+
         self.most_recent_memory = self.data_start if self.data_start > 0 else self.stack_end - 8
         self.most_recent_data = (self.data_start, 0)
         self.most_recent_stack = (self.stack_end, 0)
 
-    def get_byte(self, addr: int) -> int:
-        if      not (addr >= self.data_start and addr < self.data_end) and \
-                not (addr >= self.stack_start  and addr < self.stack_end):
-            raise Fault(f'segfault: get_byte addr={addr:x}')
-        if addr < self.memory_end:
-            raw = self.memory[addr - self.memory_start: addr+1 - self.memory_start]
-        else:
-            raw = self.stack[addr - self.stack_start: addr+1 - self.stack_start]
-
-        return int.from_bytes(raw, byteorder='little', signed=False)
-
-    def load(self, addr: int, size: int) -> bytes:
-        if      not (addr >= self.data_start and addr+size <= self.data_end) and \
-                not (addr >= self.stack_start  and addr+size <= self.stack_end):
+    def load(self, addr: int, size: int, record: bool = True) -> bytes:
+        if      not (addr >= self.data_start  and addr+size <= self.data_end) and \
+                not (addr >= self.stack_start and addr+size <= self.stack_end):
             raise Fault(f'segfault: load addr={addr:x} size={size}')
         if addr < self.memory_end:
             raw = self.memory[addr - self.memory_start: addr+size - self.memory_start]
         else:
             raw = self.stack[addr - self.stack_start: addr+size - self.stack_start]
 
-        assert(self.mem_read is None)
-        self.mem_read = MemoryValue(addr, raw, False)
+        if record:
+            assert(self.effects.mem_read is None)
+            self.effects.mem_read = MemoryValue(addr, raw, False)
         return raw
 
-    def lb(self, addr: int) -> int:
-        if      not (addr >= self.data_start and addr < self.data_end) and \
-                not (addr >= self.stack_start  and addr < self.stack_end):
-            raise Fault(f'segfault: lb addr={addr:x}')
-        if addr < self.memory_end:
-            raw = self.memory[addr - self.memory_start: addr+1 - self.memory_start]
-        else:
-            raw = self.stack[addr - self.stack_start: addr+1 - self.stack_start]
-
-        assert(self.mem_read is None)
-        self.mem_read = MemoryValue(addr, raw, True)
-        return int.from_bytes(raw, byteorder='little', signed=True)
-
-    def lh(self, addr: int) -> int:
-        if      not (addr >= self.data_start and addr+1 < self.data_end) and \
-                not (addr >= self.stack_start  and addr+1 < self.stack_end):
-            raise Fault(f'segfault: lh addr={addr:x}')
-
-        if addr < self.memory_end:
-            raw = self.memory[addr - self.memory_start: addr+2 - self.memory_start]
-        else:
-            raw = self.stack[addr - self.stack_start: addr+2 - self.stack_start]
-
-        assert(self.mem_read is None)
-        self.mem_read = MemoryValue(addr, raw, True)
-        return int.from_bytes(raw, byteorder='little', signed=True)
-
-    def lw(self, addr: int) -> int:
-        if      not (addr >= self.data_start and addr+3 < self.data_end) and \
-                not (addr >= self.stack_start  and addr+3 < self.stack_end):
-            raise Fault(f'segfault: lw addr={addr:x}')
-
-        if addr < self.memory_end:
-            raw = self.memory[addr - self.memory_start: addr+4 - self.memory_start]
-        else:
-            raw = self.stack[addr - self.stack_start: addr+4 - self.stack_start]
-
-        assert(self.mem_read is None)
-        self.mem_read = MemoryValue(addr, raw, True)
-        return int.from_bytes(raw, byteorder='little', signed=True)
-
-    def ld(self, addr: int) -> int:
-        if      not (addr >= self.data_start and addr+7 < self.data_end) and \
-                not (addr >= self.stack_start  and addr+7 < self.stack_end):
-            raise Fault(f'segfault: ld addr={addr:x}')
-
-        if addr < self.memory_end:
-            raw = self.memory[addr - self.memory_start: addr+8 - self.memory_start]
-        else:
-            raw = self.stack[addr - self.stack_start: addr+8 - self.stack_start]
-
-        assert(self.mem_read is None)
-        self.mem_read = MemoryValue(addr, raw, True)
-        return int.from_bytes(raw, byteorder='little', signed=True)
-
-    def lbu(self, addr: int) -> int:
-        if      not (addr >= self.data_start and addr < self.data_end) and \
-                not (addr >= self.stack_start  and addr < self.stack_end):
-            raise Fault(f'segfault: lbu addr={addr:x}')
-
-        if addr < self.memory_end:
-            raw = self.memory[addr - self.memory_start: addr+1 - self.memory_start]
-        else:
-            raw = self.stack[addr - self.stack_start: addr+1 - self.stack_start]
-
-        assert(self.mem_read is None)
-        self.mem_read = MemoryValue(addr, raw, False)
-        return int.from_bytes(raw, byteorder='little', signed=False)
-
-    def lhu(self, addr: int) -> int:
-        if      not (addr >= self.data_start and addr+1 < self.data_end) and \
-                not (addr >= self.stack_start  and addr+1 < self.stack_end):
-            raise Fault(f'segfault: lhu addr={addr:x}')
-
-        if addr < self.memory_end:
-            raw = self.memory[addr - self.memory_start: addr+2 - self.memory_start]
-        else:
-            raw = self.stack[addr - self.stack_start: addr+2 - self.stack_start]
-
-        assert(self.mem_read is None)
-        self.mem_read = MemoryValue(addr, raw, False)
-        return int.from_bytes(raw, byteorder='little', signed=False)
-
-    def lwu(self, addr: int) -> int:
-        if      not (addr >= self.data_start and addr+3 < self.data_end) and \
-                not (addr >= self.stack_start  and addr+3 < self.stack_end):
-            raise Fault(f'segfault: lwu addr={addr:x}')
-
-        if addr < self.memory_end:
-            raw = self.memory[addr - self.memory_start: addr+4 - self.memory_start]
-        else:
-            raw = self.stack[addr - self.stack_start: addr+4 - self.stack_start]
-
-        assert(self.mem_read is None)
-        self.mem_read = MemoryValue(addr, raw, False)
-        return int.from_bytes(raw, byteorder='little', signed=False)
+    def load_int(self, addr: int, size: int, signed: bool = True, record: bool = True) -> int:
+        raw = self.load(addr, size, record)
+        return int.from_bytes(raw, byteorder='little', signed=signed)
 
     def store(self, addr: int, raw: bytes, text_okay: bool = False, record: bool = True) -> None:
         size = len(raw)
@@ -213,80 +114,8 @@ class Machine:
             self.stack[addr - self.stack_start: addr+size - self.stack_start] = raw
 
         if record:
-            assert(self.mem_write is None)
-            self.mem_write = (MemoryValue(addr, old, True), MemoryValue(addr, raw, True))
-
-    def sb(self, addr: int, value: int) -> None:
-        if      not (addr >= self.data_start and addr < self.data_end) and \
-                not (addr >= self.stack_start  and addr < self.stack_end):
-            raise Fault(f'segfault: sb addr={addr:x}')
-
-        raw = ctypes.c_int8(value).value.to_bytes(1, byteorder='little', signed=True)
-        if addr < self.memory_end:
-            old = self.memory[addr - self.memory_start: addr+1 - self.memory_start]
-            for (i, b) in enumerate(raw):
-                self.memory[addr+i - self.memory_start] = b
-        else:
-            old = self.stack[addr - self.stack_start: addr+1 - self.stack_start]
-            for (i, b) in enumerate(raw):
-                self.stack[addr+i - self.stack_start] = b
-
-        assert(self.mem_write is None)
-        self.mem_write = (MemoryValue(addr, old, True), MemoryValue(addr, raw, True))
-
-    def sh(self, addr: int, value: int) -> None:
-        if      not (addr >= self.data_start and addr+1 < self.data_end) and \
-                not (addr >= self.stack_start  and addr+1 < self.stack_end):
-            raise Fault(f'segfault: sh addr={addr:x}')
-
-        raw = ctypes.c_int16(value).value.to_bytes(2, byteorder='little', signed=True)
-        if addr < self.memory_end:
-            old = self.memory[addr - self.memory_start: addr+2 - self.memory_start]
-            for (i, b) in enumerate(raw):
-                self.memory[addr+i - self.memory_start] = b
-        else:
-            old = self.stack[addr - self.stack_start: addr+2 - self.stack_start]
-            for (i, b) in enumerate(raw):
-                self.stack[addr+i - self.stack_start] = b
-
-        assert(self.mem_write is None)
-        self.mem_write = (MemoryValue(addr, old, True), MemoryValue(addr, raw, True))
-
-    def sw(self, addr: int, value: int) -> None:
-        if      not (addr >= self.data_start and addr+3 < self.data_end) and \
-                not (addr >= self.stack_start  and addr+3 < self.stack_end):
-            raise Fault(f'segfault: sw addr={addr:x}')
-
-        raw = ctypes.c_int32(value).value.to_bytes(4, byteorder='little', signed=True)
-        if addr < self.memory_end:
-            old = self.memory[addr - self.memory_start: addr+4 - self.memory_start]
-            for (i, b) in enumerate(raw):
-                self.memory[addr+i - self.memory_start] = b
-        else:
-            old = self.stack[addr - self.stack_start: addr+4 - self.stack_start]
-            for (i, b) in enumerate(raw):
-                self.stack[addr+i - self.stack_start] = b
-
-        assert(self.mem_write is None)
-        self.mem_write = (MemoryValue(addr, old, True), MemoryValue(addr, raw, True))
-
-    def sd(self, addr: int, value: int) -> None:
-        if      not (addr >= self.data_start and addr+7 < self.data_end) and \
-                not (addr >= self.stack_start  and addr+7 < self.stack_end):
-            raise Fault(f'segfault: sd addr={addr:x}')
-
-        raw = ctypes.c_int64(value).value.to_bytes(8, byteorder='little', signed=True)
-        if addr < self.memory_end:
-            old = self.memory[addr - self.memory_start: addr+8 - self.memory_start]
-            for (i, b) in enumerate(raw):
-                self.memory[addr+i - self.memory_start] = b
-        else:
-            old = self.stack[addr - self.stack_start: addr+8 - self.stack_start]
-            for (i, b) in enumerate(raw):
-                self.stack[addr+i - self.stack_start] = b
-
-        assert(self.mem_write is None)
-        self.mem_write = (MemoryValue(addr, old, True), MemoryValue(addr, raw, True))
+            assert(self.effects.mem_write is None)
+            self.effects.mem_write = (MemoryValue(addr, old, True), MemoryValue(addr, raw, True))
 
     def load_instruction(self, addr: int) -> int:
         if not (addr >= self.text_start and addr+3 < self.text_end):
@@ -298,50 +127,39 @@ class Machine:
     def get(self, reg: int) -> int:
         if reg != 0:
             dup = False
-            for elt in self.reg_reads:
+            for elt in self.effects.reg_reads:
                 if elt.register == reg:
                     dup = True
             if not dup:
-                self.reg_reads.append(RegisterValue(reg, self.x[reg]))
+                self.effects.reg_reads.append(RegisterValue(reg, self.x[reg]))
         return self.x[reg]
 
     def set(self, reg: int, value: int, record: bool = True) -> None:
         # zero register never changes
         if reg != 0:
             if record:
-                assert(self.reg_write is None)
-                self.reg_write = (RegisterValue(reg, self.x[reg]), RegisterValue(reg, clip(value)))
+                assert(self.effects.reg_write is None)
+                self.effects.reg_write = (RegisterValue(reg, self.x[reg]), RegisterValue(reg, clip(value)))
             self.x[reg] = clip(value)
 
     def set32(self, reg: int, value: int, record: bool = True) -> None:
         # zero register never changes
         if reg != 0:
             if record:
-                assert(self.reg_write is None)
-                self.reg_write = (RegisterValue(reg, self.x[reg]), RegisterValue(reg, clip32(value)))
+                assert(self.effects.reg_write is None)
+                self.effects.reg_write = (RegisterValue(reg, self.x[reg]), RegisterValue(reg, clip32(value)))
             self.x[reg] = clip32(value)
 
     def set_pc(self, value: int) -> None:
-        self.old_pc = self.pc
+        old_pc = self.pc
         self.pc = clip(value)
         if self.pc & 3 != 0:
             raise Fault(f'bus error: pc addr={self.pc}')
+        self.effects.pc = (old_pc, self.pc)
 
     def gather_effects(self) -> 'Effects':
-        e = Effects((self.old_pc, self.pc),
-            self.reg_reads, self.reg_write,
-            self.mem_read, self.mem_write,
-            self.stdin_delta, self.stdout_delta,
-            self.other_message, self.terminate)
-        self.reg_reads = []
-        self.reg_write = None
-        self.mem_read = None
-        self.mem_write = None
-        self.stdin_delta = None
-        self.stdout_delta = None
-        self.other_message = None
-        self.terminate = False
-        self.stack_frame = None
+        e = self.effects
+        self.effects = Effects()
         return e
 
     def text_label(self, addr: int, pc: int = 0) -> str:
@@ -403,15 +221,15 @@ Value: TypeAlias = MemoryValue | RegisterValue
 @dataclasses.dataclass
 class Effects:
     # pc: old value, new value
-    pc: tuple[int, int]
-    reg_reads: list[RegisterValue]
-    reg_write: Optional[tuple[RegisterValue, RegisterValue]]
-    mem_read: Optional[MemoryValue]
-    mem_write: Optional[tuple[MemoryValue, MemoryValue]]
-    stdin: Optional[bytes]
-    stdout: Optional[bytes]
-    other_message: Optional[str]
-    terminate: bool
+    pc: tuple[int, int] = (0, 0)
+    reg_reads: list[RegisterValue] = dataclasses.field(default_factory=list)
+    reg_write: Optional[tuple[RegisterValue, RegisterValue]] = None
+    mem_read: Optional[MemoryValue] = None
+    mem_write: Optional[tuple[MemoryValue, MemoryValue]] = None
+    stdin: Optional[bytes] = None
+    stdout: Optional[bytes] = None
+    other_message: Optional[str] = None
+    terminate: bool = False
     function_start: Optional[int] = None # sp at call time
     function_end: Optional[int] = None # sp at ret time
 
@@ -452,7 +270,6 @@ def set_most_recent_memory(m: Machine, sequence: list[tuple[Instruction, Effects
     (stack, data) = (False, False)
     for seq_i in range(seq_i, -1, -1):
         (instruction, e) = sequence[seq_i]
-        mem = None
         if e.mem_read is not None:
             (address, value) = (e.mem_read.address, e.mem_read.value)
         elif e.mem_write is not None:
@@ -822,8 +639,8 @@ def decode(labels: Machine, address: int, inst: int) -> Instruction:
             elif inst == 0x00100073:
                 # handle ebreak here--exit
                 def execute_ebreak(m: Machine) -> None:
-                    m.other_message = 'ebreak'
-                    m.terminate = True
+                    m.effects.other_message = 'ebreak'
+                    m.effects.terminate = True
 
                 return Instruction(address, inst, ['ebreak'], execute_ebreak)
 
@@ -986,7 +803,7 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
         case 0:
             def execute_lb(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
-                m.set(rd, m.lb(effective_address))
+                m.set(rd, m.load_int(effective_address, 1))
                 m.set_pc(m.pc + 4)
 
             fields=['lb', r[rd], str(imm), '()', r[rs1]]
@@ -996,7 +813,7 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
         case 1:
             def execute_lh(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
-                m.set(rd, m.lh(effective_address))
+                m.set(rd, m.load_int(effective_address, 2))
                 m.set_pc(m.pc + 4)
 
             fields=['lh', r[rd], str(imm), '()', r[rs1]]
@@ -1006,7 +823,7 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
         case 2:
             def execute_lw(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
-                m.set(rd, m.lw(effective_address))
+                m.set(rd, m.load_int(effective_address, 4))
                 m.set_pc(m.pc + 4)
 
             fields=['lw', r[rd], str(imm), '()', r[rs1]]
@@ -1016,7 +833,7 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
         case 3:
             def execute_ld(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
-                m.set(rd, m.ld(effective_address))
+                m.set(rd, m.load_int(effective_address, 8))
                 m.set_pc(m.pc + 4)
 
             fields=['ld', r[rd], str(imm), '()', r[rs1]]
@@ -1026,7 +843,7 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
         case 4:
             def execute_lbu(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
-                m.set(rd, m.lbu(effective_address))
+                m.set(rd, m.load_int(effective_address, 1, signed=False))
                 m.set_pc(m.pc + 4)
 
             fields=['lbu', r[rd], str(imm), '()', r[rs1]]
@@ -1036,7 +853,7 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
         case 5:
             def execute_lhu(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
-                m.set(rd, m.lhu(effective_address))
+                m.set(rd, m.load_int(effective_address, 2, signed=False))
                 m.set_pc(m.pc + 4)
 
             fields=['lhu', r[rd], str(imm), '()', r[rs1]]
@@ -1046,7 +863,7 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
         case 6:
             def execute_lwu(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
-                m.set(rd, m.lwu(effective_address))
+                m.set(rd, m.load_int(effective_address, 4, signed=False))
                 m.set_pc(m.pc + 4)
 
             fields=['lwu', r[rd], str(imm), '()', r[rs1]]
@@ -1060,8 +877,9 @@ def decode_store(address: int, inst: int, funct3: int, rs1: int, rs2: int, imm: 
         case 0:
             def execute_sb(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
-                val8 = m.get(rs2) & 0xff
-                m.sb(effective_address, val8)
+                raw = ctypes.c_int8(m.get(rs2)). \
+                    value.to_bytes(1, byteorder='little', signed=True)
+                m.store(effective_address, raw)
                 m.set_pc(m.pc + 4)
 
             fields=['sb', r[rs2], str(imm), '()', r[rs1]]
@@ -1071,8 +889,9 @@ def decode_store(address: int, inst: int, funct3: int, rs1: int, rs2: int, imm: 
         case 1:
             def execute_sh(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
-                val16 = m.get(rs2) & 0xffff
-                m.sh(effective_address, val16)
+                raw = ctypes.c_int16(m.get(rs2)). \
+                    value.to_bytes(2, byteorder='little', signed=True)
+                m.store(effective_address, raw)
                 m.set_pc(m.pc + 4)
 
             fields=['sh', r[rs2], str(imm), '()', r[rs1]]
@@ -1082,8 +901,9 @@ def decode_store(address: int, inst: int, funct3: int, rs1: int, rs2: int, imm: 
         case 2:
             def execute_sw(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
-                val32 = m.get(rs2) & 0xffffffff
-                m.sw(effective_address, val32)
+                raw = ctypes.c_int32(m.get(rs2)). \
+                    value.to_bytes(4, byteorder='little', signed=True)
+                m.store(effective_address, raw)
                 m.set_pc(m.pc + 4)
 
             fields=['sw', r[rs2], str(imm), '()', r[rs1]]
@@ -1093,7 +913,9 @@ def decode_store(address: int, inst: int, funct3: int, rs1: int, rs2: int, imm: 
         case 3:
             def execute_sd(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
-                m.sd(effective_address, m.get(rs2))
+                raw = ctypes.c_int64(m.get(rs2)). \
+                    value.to_bytes(8, byteorder='little', signed=True)
+                m.store(effective_address, raw)
                 m.set_pc(m.pc + 4)
 
             fields=['sd', r[rs2], str(imm), '()', r[rs1]]
@@ -1503,7 +1325,7 @@ def decode_ecall(address: int, inst: int) -> Instruction:
     def execute_ecall(m: Machine) -> None:
         if m.get(17) == 63:
             # read system call
-            m.other_message = f'read({m.get(10)}, {hex(m.get(11))}, {m.get(12)})'
+            m.effects.other_message = f'read({m.get(10)}, {hex(m.get(11))}, {m.get(12)})'
             if m.get(10) != 0:
                 raise Fault(f'read syscall: only stdin (fd 0) supported, not {m.get(10)}')
             if m.get(12) < 0:
@@ -1512,14 +1334,14 @@ def decode_ecall(address: int, inst: int) -> Instruction:
             read_res = sys.stdin.buffer.read(m.get(12))
             m.store(m.get(11), read_res)
             m.set(10, len(read_res))
-            m.stdin_delta = read_res
+            m.effects.stdin = read_res
             m.stdin += read_res
             m.set_pc(m.pc + 4)
             return
 
         if m.get(17) == 64:
             # write system call
-            m.other_message = f'write({m.get(10)}, {hex(m.get(11))}, {m.get(12)})'
+            m.effects.other_message = f'write({m.get(10)}, {hex(m.get(11))}, {m.get(12)})'
             if m.get(10) != 1:
                 raise Fault(f'write syscall: only stdout (fd 1) supported, not {m.get(10)}')
             if m.get(12) < 0:
@@ -1527,15 +1349,15 @@ def decode_ecall(address: int, inst: int) -> Instruction:
 
             buf = m.load(m.get(11), m.get(12))
             m.set(10, len(buf))
-            m.stdout_delta = buf
+            m.effects.stdout = buf
             m.stdout += buf
             m.set_pc(m.pc + 4)
             return
 
         if m.get(17) == 93:
             # exit system call
-            m.other_message = f'exit({m.get(10)})'
-            m.terminate = True
+            m.effects.other_message = f'exit({m.get(10)})'
+            m.effects.terminate = True
             return
 
         # unimplemented
@@ -1661,8 +1483,8 @@ def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, 
         try:
             instruction.execute(m)
         except Fault as err:
-            m.other_message = err.msg
-            m.terminate = True
+            m.effects.other_message = err.msg
+            m.effects.terminate = True
         e = m.gather_effects()
         sequence.append( (instruction, e) )
         if echo_out and e.stdout is not None:
@@ -1700,7 +1522,7 @@ def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, 
 
                 # sp must be aligned on 16-byte address
                 if x == 2 and m.x[x] & 0xf != 0:
-                    raise Fault(f'sp must be a multiple of 16')
+                    raise Fault('sp must be a multiple of 16')
 
             match instruction.fields[0]:
                 case 'call' | 'jal' | 'jalr':
@@ -1770,7 +1592,7 @@ def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, 
 
                     # sp must have same address, but not necessarily same value
                     if m.x[2] != entry_sp:
-                        raise Fault(f'sp is not same value as when function called')
+                        raise Fault('sp is not same value as when function called')
                     e.function_end = m.x[2]
 
                     # pop previous function context
@@ -2037,7 +1859,7 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
             src_x -= data_x+1
 
             # stack, data, or both?
-            if size_y >= 20:
+            if size_y >= 20 and m.data_start > 0:
                 stack_left = src_x+2
                 stack_y = (size_y - 3) // 3
                 data_left = src_x+2
@@ -2163,15 +1985,20 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
                         if recent <= j < recent + size:
                             next_color = 1
                         
-                        if color != next_color:
-                            if color != 0:
+                        # space between hex bytes
+                        if j > addr:
+                            # end the old color before the space
+                            if color != 0 and color != next_color:
                                 hex_s += '\03300'
-                            color = next_color
-                            hex_s += f' \033{color:02}'
-                            ascii_s += f'\033{color:02}'
-                        elif j > addr:
                             hex_s += ' '
-                        n = m.get_byte(j)
+
+                        # start the new color
+                        if color != next_color:
+                            color = next_color
+                            hex_s += f'\033{color:02}'
+                            ascii_s += f'\033{color:02}'
+
+                        n = m.load_int(j, 1, signed=False, record=False)
                         hex_s += f'{n:02x}'
                         if n >= ord(' ') and n <= ord('~'):
                             ascii_s += chr(n)
@@ -2363,8 +2190,8 @@ def main() -> None:
     parser.add_argument('-e', '--executable',
         default='a.out')
     parser.add_argument('-l', '--lint',
-        choices=[True, False],
-        default=True)
+        choices=['True', 'False'],
+        default='True')
     args = parser.parse_args()
 
     # load the program from disk and form the
@@ -2399,7 +2226,7 @@ def main() -> None:
     sequence = pre_trace(m, instructions,
         args.mode in ('run', 'debug'),
         args.mode == 'debug',
-        args.lint)
+        args.lint == 'True')
 
     if args.mode == 'trace':
         for (instruction, effects) in sequence:
