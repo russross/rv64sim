@@ -64,7 +64,7 @@ class Machine:
         self.stack_start = 0x100000 - STACK_SIZE
         for segment in segments:
             if segment.end + STACK_SIZE >= self.stack_start:
-                self.stack_start = (segment.end + STACK_SIZE*2 - 1) & 4095
+                self.stack_start = (segment.end + STACK_SIZE*2 - 1) & (STACK_SIZE-1)
         self.stack_end = self.stack_start + STACK_SIZE
         self.data_start = self.stack_end - 8
         self.data_end = 0
@@ -96,13 +96,13 @@ class Machine:
         self.stack_frames: list[int] = []
         self.effects: Optional['Effects'] = None
 
-    def set_most_recent_memory(self, sequence: list[tuple['Instruction', 'Effects']], seq_i: int) -> None:
+    def set_most_recent_memory(self, sequence: list['Effects'], seq_i: int) -> None:
         self.most_recent_memory = self.data_start if self.data_start > 0 else self.stack_end-8
         self.most_recent_data = (self.data_start, 0)
         self.most_recent_stack = (self.stack_end-8, 0)
         (stack, data) = (False, False)
         for seq_i in range(seq_i, -1, -1):
-            (instruction, e) = sequence[seq_i]
+            e = sequence[seq_i]
             if e.mem_read is not None:
                 (address, value) = (e.mem_read.address, e.mem_read.value)
             elif e.mem_write is not None:
@@ -225,7 +225,8 @@ Value: TypeAlias = MemoryValue | RegisterValue
 
 @dataclasses.dataclass
 class Effects:
-    # pc: old value, new value
+    # pairs are (old_value, new_value)
+    instruction: Instruction
     pc: tuple[int, int] = (0, 0)
     reg_reads: list[RegisterValue] = dataclasses.field(default_factory=list)
     reg_write: Optional[tuple[RegisterValue, RegisterValue]] = None
@@ -442,6 +443,7 @@ def load_elf(filename: str) -> Machine:
         elif name == '__global_pointer$':
             # keep global pointer
             global_pointer = st_value
+            address_symbols[st_value] = name
             continue
         elif name.startswith('$') or name.startswith('__'):
             # skip internal names
@@ -1304,54 +1306,103 @@ def decode_ecall(address: int, inst: int) -> Instruction:
 
     return Instruction(address, inst, ['ecall'], execute_ecall)
 
-def pair_instructions(m: Machine, instructions: dict[int, Instruction]) -> None:
-    for pc in range(m.text_start, m.text_end, 4):
-        instruction = instructions[pc]
-        if pc+4 < m.text_end:
-            instruction2 = instructions[pc+4]
-            match (instruction, instruction2):
-                case (Instruction(fields=['auipc', rd0, imm0]),
-                      Instruction(fields=['addi', rd, rs1, imm])) if rd0 == rd and rs1 == rd:
-                    addr = pc + int(imm0) + int(imm)
-                    sym = m.address_label(addr)
-                    instruction.fields = ['auipc', rd0, imm0, f'[la {rd0}, {sym}]']
-                case (Instruction(fields=['auipc', rd0, imm0]),
-                      Instruction(fields=['jalr', rd, imm, '()', rs1])) if rd0 == rd and rs1 == rd:
-                    addr = pc + int(imm0) + int(imm)
-                    sym = m.address_label(addr)
-                    instruction.fields = ['auipc', rd0, imm0, f'[call {sym}]']
+def find_instruction(instructions: list[Instruction], address: int) -> int:
+    # jump to the approximate location in the list
+    # by pretending all instructions are the same length
+    from_start = address - instructions[0].address
+    span = instructions[-1].address - instructions[0].address
+    i = (len(instructions) * from_start) // span
+    guess = i
 
-def add_labels(m: Machine, instructions: dict[int, Instruction]) -> None:
+    # now correct
+    i = max(0, min(i, len(instructions) - 1))
+    while instructions[i].address > address:
+        i -= 1
+    while instructions[i].address < address:
+        i += 1
+    #print(f'guess: {guess}, actual: {i}, delta: {abs(guess-i)}')
+    return i
+
+def pair_instructions(m: Machine, instructions: list[Instruction]) -> None:
+    i = 0
+    while i + 1 < len(instructions):
+        instruction = instructions[i]
+        instruction2 = instructions[i+1]
+        match (instruction, instruction2):
+            case (Instruction(fields=['auipc', rd0, imm0]),
+                  Instruction(fields=['addi', rd, rs1, imm])) if rd0 == rd and rs1 == rd:
+                addr = instruction.address + int(imm0) + int(imm)
+                sym = m.address_label(addr)
+
+                # wrapper to capture snapshots of the needed values
+                def wrap_la(target_reg: int, value: int) -> Callable[[Machine], None]:
+                    def execute_la(m: Machine) -> None:
+                        m.set(target_reg, value)
+                        m.set_pc(m.pc + 8)
+                    return execute_la
+
+                # replace the auipc, addi sequence with la
+                new_instruction = Instruction(
+                    instruction.address, 
+                    instruction.instruction << 32 | instruction2.instruction,
+                    ['la', rd0, sym],
+                    wrap_la(r.index(rd), addr))
+                instructions[i] = new_instruction
+                del instructions[i+1]
+            case (Instruction(fields=['auipc', rd0, imm0]),
+                  Instruction(fields=['jalr', rd, imm, '()', rs1])) if rd0 == rd and rs1 == rd and rd == 'ra':
+                addr = instruction.address + int(imm0) + int(imm)
+                sym = m.address_label(addr)
+
+                # wrapper to capture snapshots of the needed values
+                def wrap_call(ra_reg: int, target_addr: int) -> Callable[[Machine], None]:
+                    def execute_call(m: Machine) -> None:
+                        m.set(ra_reg, m.pc + 8)
+                        m.set_pc(target_addr)
+                    return execute_call
+
+                # replace the auipc, addi sequence with la
+                new_instruction = Instruction(
+                    instruction.address, 
+                    instruction.instruction << 32 | instruction2.instruction,
+                    ['call', sym],
+                    wrap_call(r.index(rd), addr))
+                instructions[i] = new_instruction
+                del instructions[i+1]
+
+                instruction.fields = ['auipc', rd0, imm0, f'[call {sym}]']
+        i += 1
+
+def add_labels(m: Machine, instructions: list[Instruction]) -> None:
     # add labels from the symbol table and note branch targets
-    for (pc, instruction) in instructions.items():
-        if pc in m.address_symbols:
-            instruction.label = m.address_symbols[pc]
+    for instruction in instructions:
+        if instruction.address in m.address_symbols:
+            instruction.label = m.address_symbols[instruction.address]
         if instruction.static_target is not None:
-            instructions[instruction.static_target].is_target = True
+            i = find_instruction(instructions, instruction.static_target)
+            instructions[i].is_target = True
 
     # add numbered local labels
     next_label = 1
     next_fn = {}
     prev = -1
-    for pc in range(m.text_start, m.text_end, 4):
-        instruction = instructions[pc]
+    for instruction in instructions:
         if instruction.label is None and instruction.is_target:
             instruction.label = str(next_label)
             next_label += 1
         elif instruction.label is not None:
             next_label = 1
             if prev >= 0:
-                next_fn[prev] = pc
-            prev = pc
+                next_fn[prev] = instruction.address
+            prev = instruction.address
     if prev >= 0:
         next_fn[prev] = m.text_end
 
     # update branches to reference local labels
     fn_start = 0
-    for pc in range(m.text_start, m.text_end, 4):
-        instruction = instructions[pc]
+    for instruction in instructions:
         if instruction.label is not None and not instruction.label.isdigit():
-            fn_start = pc
+            fn_start = instruction.address
             fn_end = next_fn[fn_start]
         match instruction.fields:
             case ['j', dest]:
@@ -1390,17 +1441,18 @@ def add_labels(m: Machine, instructions: dict[int, Instruction]) -> None:
         if addr < fn_start or addr >= fn_end:
             continue
 
-        target_label = instructions[addr].label
+        i = find_instruction(instructions, addr)
+        target_label = instructions[i].label
         assert(target_label is not None)
         if target_label.isdigit():
-            if addr < pc:
+            if addr < instruction.address:
                 instruction.fields[-1] = f'{target_label}b'
-            elif addr > pc:
+            elif addr > instruction.address:
                 instruction.fields[-1] = f'{target_label}f'
 
 next_value_number = 32
 
-def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, echo_in: bool, lint: bool) -> list[tuple[Instruction, Effects]]:
+def pre_trace(m: Machine, instructions: list[Instruction], echo_out: bool, echo_in: bool, lint: bool) -> list[Effects]:
     global next_value_number
     context_stack: list[tuple[list[int], list[bool], int]] = []
     entry_registers = list(range(32))
@@ -1410,10 +1462,15 @@ def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, 
     memory = {}
 
     sequence = []
+    i = -1
     while True:
         # fetch the next instruction
-        instruction = instructions[m.pc]
-        e = Effects()
+        i += 1
+        if i >= len(instructions) or instructions[i].address != m.pc:
+            i = find_instruction(instructions, m.pc)
+
+        instruction = instructions[i]
+        e = Effects(instruction)
         m.effects = e
         try:
             instruction.execute(m)
@@ -1421,7 +1478,7 @@ def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, 
             e.other_message = err.msg
             e.terminate = True
         m.effects = None
-        sequence.append( (instruction, e) )
+        sequence.append(e)
         if echo_out and e.stdout is not None:
             sys.stdout.buffer.write(e.stdout)
             sys.stdout.flush()
@@ -1641,15 +1698,17 @@ def pre_trace(m: Machine, instructions: dict[int, Instruction], echo_out: bool, 
 
     return sequence
 
-def find_function_bounds(m: Machine, pc: int) -> tuple[int, int]:
-    assert(pc >= m.text_start and pc < m.text_end and pc%4 == 0)
-    for start in range(pc, m.text_start-4, -4):
-        if start in m.address_symbols:
+def find_function_bounds(instructions: list[Instruction], pc_i: int) -> tuple[int, int]:
+    assert(pc_i >= 0 and pc_i < len(instructions))
+    for start_i in range(pc_i, -1, -1):
+        label = instructions[start_i].label
+        if label is not None and not label.isdigit():
             break
-    for end in range(pc+4, m.text_end, 4):
-        if end in m.address_symbols:
+    for end_i in range(pc_i+1, len(instructions)):
+        label = instructions[end_i].label
+        if label is not None and not label.isdigit():
             break
-    return (start, end)
+    return (start_i, end_i)
 
 def render_line(instruction: Instruction, effects: Optional[Effects]) -> list[str]:
     fields = list(instruction.fields)
@@ -1701,7 +1760,7 @@ def calc_range(length: int, cursor: int, window_size: int) -> tuple[int, int]:
         end -= shift
     return (start, end)
 
-def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[Instruction, Effects]]) -> None:
+def ui(m: Machine, instructions: list[Instruction], sequence: list[Effects]) -> None:
     # make sure stdin is connected to the tty
     if not sys.stdin.isatty():
         sys.stdin.close()
@@ -1775,10 +1834,10 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
 
     (src_y, src_x) = (0, 0)
     seq_i = 0
-    cursor_addr = sequence[seq_i][0].address
-    pc = cursor_addr
+    pc_i = find_instruction(instructions, sequence[seq_i].instruction.address)
+    cursor_i = pc_i
     def draw() -> None:
-        nonlocal stdscr, size_y, size_x, src_y, src_x, seq_i, cursor_addr, pc, m, data_colors
+        nonlocal stdscr, size_y, size_x, src_y, src_x, seq_i, m, data_colors
         if not active:
             return
         stdscr.erase()
@@ -1827,7 +1886,8 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
         (arrow_top, arrow_top_addr) = ([], -1)
         (arrow_bottom, arrow_bottom_addr) = ([], -1)
 
-        (instruction, effects) = sequence[seq_i]
+        effects = sequence[seq_i]
+        instruction = effects.instruction
         if      instruction.fields[-1][-1] in 'bf' and \
                 instruction.static_target is not None and instruction.return_target is None and \
                 effects.pc[1] == instruction.static_target and \
@@ -1841,30 +1901,29 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
                 [curses.ACS_LLCORNER, curses.ACS_HLINE, curses.ACS_HLINE],
                 effects.pc[0] if is_back else effects.pc[1])
 
-        (start, _) = calc_range(
-            (m.text_end - m.text_start)//4,
-            (cursor_addr - m.text_start)//4,
-            src_y)
+        (start, _) = calc_range(len(instructions), cursor_i, src_y)
         for i in range(src_y):
-            addr = m.text_start + (start + i)*4
-            arrow = []
-            if addr == arrow_top_addr:
-                arrow = arrow_top
-            elif addr == arrow_bottom_addr:
-                arrow = arrow_bottom
-            elif arrow_top_addr < addr < arrow_bottom_addr:
-                arrow = [curses.ACS_VLINE]
-            if addr == pc:
-                (instruction, effects) = sequence[seq_i]
-                lines = render_line(instruction, effects)
-                color = curses.color_pair(1)
-            elif addr in instructions:
-                instruction = instructions[addr]
-                lines = render_line(instruction, None)
-                if addr == cursor_addr:
-                    color = curses.color_pair(2)
+            i_i = start + i
+            if 0 <= i_i < len(instructions):
+                instruction = instructions[i_i]
+                addr = instruction.address
+                arrow = []
+                if addr == arrow_top_addr:
+                    arrow = arrow_top
+                elif addr == arrow_bottom_addr:
+                    arrow = arrow_bottom
+                elif arrow_top_addr < addr < arrow_bottom_addr:
+                    arrow = [curses.ACS_VLINE]
+                if i_i == pc_i:
+                    effects = sequence[seq_i]
+                    lines = render_line(instruction, effects)
+                    color = curses.color_pair(1)
                 else:
-                    color = curses.color_pair(0)
+                    lines = render_line(instruction, None)
+                    if i_i == cursor_i:
+                        color = curses.color_pair(2)
+                    else:
+                        color = curses.color_pair(0)
             else:
                 lines = ['']
                 color = curses.color_pair(0)
@@ -1905,7 +1964,7 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
                 (addr_s, hex_s, ascii_s) = (f'{"":7}', '', '')
                 color = 0
                 for j in range(addr, addr+8):
-                    if j >= m.data_start and j < m.data_end or j >= m.stack_start and j < m.stack_start+4096:
+                    if j >= m.data_start and j < m.data_end or j >= m.stack_start and j < m.stack_start+STACK_SIZE:
                         addr_s = f'{addr:06x}:'
 
                         # did we just hit a label?
@@ -2016,7 +2075,7 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
             for (i, line) in enumerate(lines):
                 stdscr.addstr(out_top+i, 1, line[:reg_x])
 
-        status_line = f' Step {seq_i+1}/{len(sequence)} PC:{pc:x} '[:size_x-4]
+        status_line = f' Step {seq_i+1}/{len(sequence)} PC:{instructions[pc_i].address:x} '[:size_x-4]
         stdscr.addstr(size_y-1, 2, status_line)
         stdscr.refresh()
 
@@ -2029,76 +2088,72 @@ def ui(m: Machine, instructions: dict[int, Instruction], sequence: list[tuple[In
         stdscr.nodelay(not block)
         key = stdscr.getch()
         if key == curses.KEY_RIGHT and seq_i+1 < len(sequence):
-            apply(m, sequence[seq_i][1], True)
+            apply(m, sequence[seq_i], True)
             seq_i += 1
             m.set_most_recent_memory(sequence, seq_i)
-            pc = sequence[seq_i][0].address
-            cursor_addr = pc
+            pc_i = find_instruction(instructions, sequence[seq_i].instruction.address)
+            cursor_i = pc_i
         elif key == curses.KEY_LEFT and seq_i > 0:
             seq_i -= 1
-            apply(m, sequence[seq_i][1], False)
+            apply(m, sequence[seq_i], False)
             m.set_most_recent_memory(sequence, seq_i)
-            pc = sequence[seq_i][0].address
-            cursor_addr = pc
-        elif key == curses.KEY_UP and cursor_addr-4 >= m.text_start:
-            cursor_addr -= 4
-        elif key == curses.KEY_DOWN and cursor_addr+4 < m.text_end:
-            cursor_addr += 4
-        elif key == curses.KEY_PPAGE and cursor_addr-4 >= m.text_start:
-            cursor_addr -= 4*src_y
-            if cursor_addr < m.text_start:
-                cursor_addr = m.text_start
-        elif key == curses.KEY_NPAGE and cursor_addr+4 < m.text_end:
-            cursor_addr += 4*src_y
-            if cursor_addr >= m.text_end:
-                cursor_addr = m.text_end-4
+            pc_i = find_instruction(instructions, sequence[seq_i].instruction.address)
+            cursor_i = pc_i
+        elif key == curses.KEY_UP:
+            cursor_i = max(0, cursor_i - 1)
+        elif key == curses.KEY_DOWN:
+            cursor_i = min(len(instructions) - 1, cursor_i + 1)
+        elif key == curses.KEY_PPAGE:
+            cursor_i = max(0, cursor_i - src_y)
+        elif key == curses.KEY_NPAGE:
+            cursor_i = min(len(instructions) - 1, cursor_i + src_y)
         elif key in (curses.KEY_ENTER, ord('\n')):
             # find the next time the pc reaches this address
             for peek in range(seq_i+1, len(sequence)):
-                if sequence[peek][0].address == cursor_addr:
+                if find_instruction(instructions, sequence[peek].instruction.address) == cursor_i:
                     # play the sequence forward to this point
                     for seq_i in range(seq_i, peek):
-                        apply(m, sequence[seq_i][1], True)
+                        apply(m, sequence[seq_i], True)
                     seq_i += 1
                     m.set_most_recent_memory(sequence, seq_i)
-                    pc = sequence[seq_i][0].address
-                    cursor_addr = pc
+                    pc_i = find_instruction(instructions, sequence[seq_i].instruction.address)
+                    cursor_i = pc_i
                     break
         elif key in (curses.KEY_BACKSPACE , ord('\b'), ord('\x7f')):
             # find the previous time the pc was at this address
             for peek in range(seq_i-1, -1, -1):
-                if sequence[peek][0].address == cursor_addr:
+                if find_instruction(instructions, sequence[peek].instruction.address) == cursor_i:
                     # play the sequence backward to this point
                     for seq_i in range(seq_i-1, peek-1, -1):
-                        apply(m, sequence[seq_i][1], False)
+                        apply(m, sequence[seq_i], False)
                     m.set_most_recent_memory(sequence, seq_i)
-                    pc = sequence[seq_i][0].address
-                    cursor_addr = pc
+                    pc_i = find_instruction(instructions, sequence[seq_i].instruction.address)
+                    cursor_i = pc_i
                     break
         elif key == curses.KEY_HOME:
             # jump back to when current function was called
-            (func_start, func_end) = find_function_bounds(m, pc)
+            (func_start_i, func_end_i) = find_function_bounds(instructions, pc_i)
 
             first = True
             for seq_i in range(seq_i, -1, -1):
-                pc = sequence[seq_i][0].address
-                cursor_addr = pc
+                pc_i = find_instruction(instructions, sequence[seq_i].instruction.address)
+                cursor_i = pc_i
                 if first:
                     first = False
                 else:
-                    apply(m, sequence[seq_i][1], False)
-                if func_start <= pc < func_end and (seq_i == 0 or sequence[seq_i-1][0].fields[0] == 'call'):
+                    apply(m, sequence[seq_i], False)
+                if func_start_i <= pc_i < func_end_i and (seq_i == 0 or sequence[seq_i-1].instruction.fields[0] == 'call'):
                     break
             m.set_most_recent_memory(sequence, seq_i)
         elif key == curses.KEY_END:
             # find the next return (or end of program) from current function
-            (func_start, func_end) = find_function_bounds(m, pc)
+            (func_start_i, func_end_i) = find_function_bounds(instructions, pc_i)
             for seq_i in range(seq_i, len(sequence)):
-                pc = sequence[seq_i][0].address
-                cursor_addr = pc
-                if func_start <= pc < func_end and sequence[seq_i][0].fields[0] == 'ret':
+                pc_i = find_instruction(instructions, sequence[seq_i].instruction.address)
+                cursor_i = pc_i
+                if func_start_i <= pc_i < func_end_i and sequence[seq_i].instruction.fields[0] == 'ret':
                     break
-                apply(m, sequence[seq_i][1], True)
+                apply(m, sequence[seq_i], True)
             m.set_most_recent_memory(sequence, seq_i)
 
         elif key == curses.KEY_RESIZE:
@@ -2137,11 +2192,11 @@ def main() -> None:
     m = load_elf(args.executable)
 
     # disassemble the entire text segment
-    instructions = {}
+    instructions = []
     for pc in range(m.text_start, m.text_end, 4):
         inst = m.load_instruction(pc)
         instruction = decode(m, pc, inst)
-        instructions[pc] = instruction
+        instructions.append(instruction)
     pair_instructions(m, instructions)
 
     add_labels(m, instructions)
@@ -2168,8 +2223,8 @@ def main() -> None:
         args.lint == 'True')
 
     if args.mode == 'trace':
-        for (instruction, effects) in sequence:
-            for line in render_line(instruction, effects):
+        for effects in sequence:
+            for line in render_line(effects.instruction, effects):
                 print(line)
 
     if args.mode == 'debug':
@@ -2179,8 +2234,8 @@ def main() -> None:
         ui(m, instructions, sequence)
 
     # should have ended with exit(0)
-    (instruction, effects) = sequence[-1]
-    if instruction.fields[0] == 'ecall' and effects.other_message is not None:
+    effects = sequence[-1]
+    if effects.instruction.fields[0] == 'ecall' and effects.other_message is not None:
         parts = re.match(r'exit\((\d+)\)', effects.other_message)
         if parts is not None:
             sys.exit(int(parts[1]))
