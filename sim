@@ -184,7 +184,7 @@ class Machine:
     def set_pc(self, value: int) -> None:
         old_pc = self.pc
         self.pc = clip(value)
-        if self.pc & 3 != 0:
+        if self.pc & 1 != 0:
             raise Fault(f'bus error: pc addr={self.pc}')
         if self.effects is not None:
             self.effects.pc = (old_pc, self.pc)
@@ -195,6 +195,36 @@ class Machine:
         else:
             return str(addr)
 
+    def apply(self, e: 'Effects', is_forward: bool) -> None:
+        self.set_pc(e.pc[0 if is_forward else 1])
+        if e.reg_write is not None:
+            write = e.reg_write[1 if is_forward else 0]
+            self.set(write.register, write.value)
+        if e.mem_write is not None:
+            store = e.mem_write[1 if is_forward else 0]
+            self.store(store.address, store.value)
+        if e.stdout is not None:
+            if is_forward:
+                self.stdout += e.stdout
+            else:
+                self.stdout = self.stdout[:-len(e.stdout)]
+        if e.stdin is not None:
+            # echo input
+            if is_forward:
+                self.stdout += e.stdin
+            else:
+                self.stdout = self.stdout[:-len(e.stdin)]
+        if e.function_start is not None:
+            if is_forward:
+                self.stack_frames.append(e.function_start)
+            else:
+                self.stack_frames.pop()
+        if e.function_end is not None:
+            if is_forward:
+                self.stack_frames.pop()
+            else:
+                self.stack_frames.append(e.function_end)
+
 @dataclasses.dataclass
 class Instruction:
     address: int
@@ -204,8 +234,31 @@ class Instruction:
     static_target: Optional[int] = None
     return_target: Optional[int] = None
     label: Optional[str] = None
+    length: int = 4
     is_target: bool = False
     arrows: Optional[list[tuple[bool, bool, int]]] = None
+
+    def render(self) -> str:
+        fields = list(self.fields)
+        if fields[-1][0] == '[':
+            comment = fields.pop()
+        else:
+            comment = ''
+        if len(fields) >= 3 and fields[-2] == '()':
+            if fields[-3] == '0':
+                parts = fields[1:-3] + [f'({fields[-1]})']
+            else:
+                parts = fields[1:-3] + [f'{fields[-3]}({fields[-1]})']
+        else:
+            parts = fields[1:]
+        if comment != '':
+            parts.append(comment)
+        disasm = f'{self.fields[0]:<8}' + ', '.join(parts)
+        if self.label is None:
+            addr_part = ''
+        else:
+            addr_part = self.label + ':'
+        return f'{addr_part:<16}{disasm:<48}'
 
 class Fault(Exception):
     def __init__(self, msg: str):
@@ -239,49 +292,27 @@ class Effects:
     function_start: Optional[int] = None # sp at call time
     function_end: Optional[int] = None # sp at ret time
 
-def apply(m: Machine, e: Effects, is_forward: bool) -> None:
-    m.set_pc(e.pc[0 if is_forward else 1])
-    if e.reg_write is not None:
-        write = e.reg_write[1 if is_forward else 0]
-        m.set(write.register, write.value)
-    if e.mem_write is not None:
-        store = e.mem_write[1 if is_forward else 0]
-        m.store(store.address, store.value)
-    if e.stdout is not None:
-        if is_forward:
-            m.stdout += e.stdout
-        else:
-            m.stdout = m.stdout[:-len(e.stdout)]
-    if e.stdin is not None:
-        # echo input
-        if is_forward:
-            m.stdout += e.stdin
-        else:
-            m.stdout = m.stdout[:-len(e.stdin)]
-    if e.function_start is not None:
-        if is_forward:
-            m.stack_frames.append(e.function_start)
-        else:
-            m.stack_frames.pop()
-    if e.function_end is not None:
-        if is_forward:
-            m.stack_frames.pop()
-        else:
-            m.stack_frames.append(e.function_end)
+    def report(self) -> list[str]:
+        parts = []
+        if self.reg_write is not None:
+            (rd, val) = (self.reg_write[1].register, self.reg_write[1].value)
+            if r[rd] in ('ra', 'sp'):
+                parts.append(f'{r[rd]} <- {hex(val)}')
+            else:
+                parts.append(f'{r[rd]} <- {val}')
+        if self.pc[1] != self.pc[0] + self.instruction.length:
+            parts.append(f'pc <- {hex(self.pc[1])}')
 
-def report_effects(e: Effects) -> str:
-    parts = []
-    if e.reg_write is not None:
-        (rd, val) = (e.reg_write[1].register, e.reg_write[1].value)
-        if r[rd] in ('ra', 'sp'):
-            parts.append(f'{r[rd]} <- {hex(val)}')
-        else:
-            parts.append(f'{r[rd]} <- {val}')
-    if e.pc[1] != e.pc[0] + 4:
-        parts.append(f'pc <- {hex(e.pc[1])}')
-    if e.other_message is not None:
-        parts.append(e.other_message)
-    return ', '.join(parts)
+        lines = [', '.join(parts)]
+
+        if self.other_message is not None:
+            lines.append(self.other_message)
+        if self.stdin is not None:
+            lines.append(repr(self.stdin.decode()))
+        if self.stdout is not None:
+            lines.append(repr(self.stdout.decode()))
+
+        return lines
 
 # misc helpers
 def unsigned(i: int) -> int:
@@ -399,9 +430,7 @@ def load_elf(filename: str) -> Machine:
             # in-memory section; see if we have loadable data
             init = b''
             for (p_vaddr, seg_raw) in chunks:
-                if sh_addr <= p_vaddr < sh_addr+sh_size:
-                    init = seg_raw[p_vaddr-sh_addr: p_vaddr-sh_addr + sh_size]
-                elif p_vaddr <= sh_addr < p_vaddr+len(seg_raw):
+                if p_vaddr <= sh_addr < p_vaddr+len(seg_raw):
                     init = seg_raw[sh_addr-p_vaddr: sh_addr-p_vaddr + sh_size]
             segments.append(Segment(sh_strs[sh_name],
                                     sh_addr,
@@ -567,7 +596,7 @@ def decode(labels: Machine, address: int, inst: int) -> Instruction:
         case 0x0f:
             def execute_fence(m: Machine) -> None:
                 # do nothing
-                m.set_pc(m.pc + 4)
+                pass
 
             return Instruction(address, inst, ['fence', '*'], execute_fence)
 
@@ -589,14 +618,12 @@ def decode(labels: Machine, address: int, inst: int) -> Instruction:
 def decode_lui(address: int, inst: int, rd: int, imm: int) -> Instruction:
     def execute_lui(m: Machine) -> None:
         m.set(rd, imm)
-        m.set_pc(m.pc + 4)
 
     return Instruction(address, inst, ['lui', r[rd], str(imm)], execute_lui)
 
 def decode_auipc(address: int, inst: int, rd: int, imm: int) -> Instruction:
     def execute_auipc(m: Machine) -> None:
         m.set(rd, m.pc + imm)
-        m.set_pc(m.pc + 4)
 
     return Instruction(address, inst, ['auipc', r[rd], str(imm)], execute_auipc)
 
@@ -644,8 +671,6 @@ def decode_branches(labels: Machine, address: int, inst: int, funct3: int, rs1: 
             def execute_beq(m: Machine) -> None:
                 if m.get(rs1) == m.get(rs2):
                     m.set_pc(m.pc + imm)
-                else:
-                    m.set_pc(m.pc + 4)
 
             dest = labels.address_label(address+imm)
             if r[rs1] == 'zero':
@@ -662,8 +687,6 @@ def decode_branches(labels: Machine, address: int, inst: int, funct3: int, rs1: 
             def execute_bne(m: Machine) -> None:
                 if m.get(rs1) != m.get(rs2):
                     m.set_pc(m.pc + imm)
-                else:
-                    m.set_pc(m.pc + 4)
 
             dest = labels.address_label(address+imm)
             if r[rs1] == 'zero':
@@ -679,8 +702,6 @@ def decode_branches(labels: Machine, address: int, inst: int, funct3: int, rs1: 
             def execute_blt(m: Machine) -> None:
                 if m.get(rs1) < m.get(rs2):
                     m.set_pc(m.pc + imm)
-                else:
-                    m.set_pc(m.pc + 4)
 
             dest = labels.address_label(address+imm)
             if r[rs1] == 'zero':
@@ -697,8 +718,6 @@ def decode_branches(labels: Machine, address: int, inst: int, funct3: int, rs1: 
             def execute_bge(m: Machine) -> None:
                 if m.get(rs1) >= m.get(rs2):
                     m.set_pc(m.pc + imm)
-                else:
-                    m.set_pc(m.pc + 4)
 
             dest = labels.address_label(address+imm)
             if r[rs1] == 'zero':
@@ -715,8 +734,6 @@ def decode_branches(labels: Machine, address: int, inst: int, funct3: int, rs1: 
             def execute_bltu(m: Machine) -> None:
                 if unsigned(m.get(rs1)) < unsigned(m.get(rs2)):
                     m.set_pc(m.pc + imm)
-                else:
-                    m.set_pc(m.pc + 4)
 
             dest = labels.address_label(address+imm)
 
@@ -727,8 +744,6 @@ def decode_branches(labels: Machine, address: int, inst: int, funct3: int, rs1: 
             def execute_bgeu(m: Machine) -> None:
                 if unsigned(m.get(rs1)) >= unsigned(m.get(rs2)):
                     m.set_pc(m.pc + imm)
-                else:
-                    m.set_pc(m.pc + 4)
 
             dest = labels.address_label(address+imm)
 
@@ -744,7 +759,6 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
             def execute_lb(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
                 m.set(rd, m.load_int(effective_address, 1))
-                m.set_pc(m.pc + 4)
 
             fields=['lb', r[rd], str(imm), '()', r[rs1]]
 
@@ -754,7 +768,6 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
             def execute_lh(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
                 m.set(rd, m.load_int(effective_address, 2))
-                m.set_pc(m.pc + 4)
 
             fields=['lh', r[rd], str(imm), '()', r[rs1]]
 
@@ -764,7 +777,6 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
             def execute_lw(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
                 m.set(rd, m.load_int(effective_address, 4))
-                m.set_pc(m.pc + 4)
 
             fields=['lw', r[rd], str(imm), '()', r[rs1]]
 
@@ -774,7 +786,6 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
             def execute_ld(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
                 m.set(rd, m.load_int(effective_address, 8))
-                m.set_pc(m.pc + 4)
 
             fields=['ld', r[rd], str(imm), '()', r[rs1]]
 
@@ -784,7 +795,6 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
             def execute_lbu(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
                 m.set(rd, m.load_int(effective_address, 1, signed=False))
-                m.set_pc(m.pc + 4)
 
             fields=['lbu', r[rd], str(imm), '()', r[rs1]]
 
@@ -794,7 +804,6 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
             def execute_lhu(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
                 m.set(rd, m.load_int(effective_address, 2, signed=False))
-                m.set_pc(m.pc + 4)
 
             fields=['lhu', r[rd], str(imm), '()', r[rs1]]
 
@@ -804,7 +813,6 @@ def decode_load(address: int, inst: int, funct3: int, rd: int, rs1: int, imm: in
             def execute_lwu(m: Machine) -> None:
                 effective_address = m.get(rs1) + imm
                 m.set(rd, m.load_int(effective_address, 4, signed=False))
-                m.set_pc(m.pc + 4)
 
             fields=['lwu', r[rd], str(imm), '()', r[rs1]]
 
@@ -820,7 +828,6 @@ def decode_store(address: int, inst: int, funct3: int, rs1: int, rs2: int, imm: 
                 raw = ctypes.c_int8(m.get(rs2)). \
                     value.to_bytes(1, byteorder='little', signed=True)
                 m.store(effective_address, raw)
-                m.set_pc(m.pc + 4)
 
             fields=['sb', r[rs2], str(imm), '()', r[rs1]]
 
@@ -832,7 +839,6 @@ def decode_store(address: int, inst: int, funct3: int, rs1: int, rs2: int, imm: 
                 raw = ctypes.c_int16(m.get(rs2)). \
                     value.to_bytes(2, byteorder='little', signed=True)
                 m.store(effective_address, raw)
-                m.set_pc(m.pc + 4)
 
             fields=['sh', r[rs2], str(imm), '()', r[rs1]]
 
@@ -844,7 +850,6 @@ def decode_store(address: int, inst: int, funct3: int, rs1: int, rs2: int, imm: 
                 raw = ctypes.c_int32(m.get(rs2)). \
                     value.to_bytes(4, byteorder='little', signed=True)
                 m.store(effective_address, raw)
-                m.set_pc(m.pc + 4)
 
             fields=['sw', r[rs2], str(imm), '()', r[rs1]]
 
@@ -856,7 +861,6 @@ def decode_store(address: int, inst: int, funct3: int, rs1: int, rs2: int, imm: 
                 raw = ctypes.c_int64(m.get(rs2)). \
                     value.to_bytes(8, byteorder='little', signed=True)
                 m.store(effective_address, raw)
-                m.set_pc(m.pc + 4)
 
             fields=['sd', r[rs2], str(imm), '()', r[rs1]]
 
@@ -872,7 +876,6 @@ def decode_alu_imm(labels: Machine, address: int, inst: int, funct3: int, rd: in
         case 0:
             def execute_addi(m: Machine) -> None:
                 m.set(rd, m.get(rs1) + imm)
-                m.set_pc(m.pc + 4)
 
             match (r[rd], r[rs1], imm):
                 case ('zero', 'zero', 0):
@@ -891,14 +894,12 @@ def decode_alu_imm(labels: Machine, address: int, inst: int, funct3: int, rd: in
         case 2:
             def execute_slti(m: Machine) -> None:
                 m.set(rd, 1 if m.get(rs1) < imm else 0)
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['slti', r[rd], r[rs1], str(imm)], execute_slti)
 
         case 3:
             def execute_sltiu(m: Machine) -> None:
                 m.set(rd, 1 if unsigned(m.get(rs1)) < unsigned(imm) else 0)
-                m.set_pc(m.pc + 4)
 
             if imm == 1:
                 fields=['seqz', r[rd], r[rs1]]
@@ -910,7 +911,6 @@ def decode_alu_imm(labels: Machine, address: int, inst: int, funct3: int, rd: in
         case 4:
             def execute_xori(m: Machine) -> None:
                 m.set(rd, m.get(rs1) ^ unsigned(imm))
-                m.set_pc(m.pc + 4)
 
             if imm == -1:
                 fields=['not', r[rd], r[rs1]]
@@ -922,14 +922,12 @@ def decode_alu_imm(labels: Machine, address: int, inst: int, funct3: int, rd: in
         case 6:
             def execute_ori(m: Machine) -> None:
                 m.set(rd, m.get(rs1) | imm)
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['ori', r[rd], r[rs1], str(imm)], execute_ori)
 
         case 7:
             def execute_andi(m: Machine) -> None:
                 m.set(rd, m.get(rs1) & imm)
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['andi', r[rd], r[rs1], str(imm)], execute_andi)
 
@@ -939,7 +937,6 @@ def decode_alu_imm(labels: Machine, address: int, inst: int, funct3: int, rd: in
 
             def execute_slli(m: Machine) -> None:
                 m.set(rd, m.get(rs1) << shamt)
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['slli', r[rd], r[rs1], str(shamt)], execute_slli)
 
@@ -947,14 +944,12 @@ def decode_alu_imm(labels: Machine, address: int, inst: int, funct3: int, rd: in
             if imm_high == 0x00:
                 def execute_srli(m: Machine) -> None:
                     m.set(rd, unsigned(m.get(rs1)) >> shamt)
-                    m.set_pc(m.pc + 4)
 
                 return Instruction(address, inst, ['srli', r[rd], r[rs1], str(shamt)], execute_srli)
 
             elif imm_high == 0x10:
                 def execute_srai(m: Machine) -> None:
                     m.set(rd, m.get(rs1) >> shamt)
-                    m.set_pc(m.pc + 4)
 
                 return Instruction(address, inst, ['srai', r[rd], r[rs1], str(shamt)], execute_srai)
 
@@ -970,7 +965,6 @@ def decode_alu_imm_w(labels: Machine, address: int, inst: int, funct3: int, rd: 
         case 0:
             def execute_addiw(m: Machine) -> None:
                 m.set32(rd, m.get(rs1) + imm)
-                m.set_pc(m.pc + 4)
 
             match (r[rd], r[rs1], imm):
                 case ('zero', 'zero', 0):
@@ -988,7 +982,6 @@ def decode_alu_imm_w(labels: Machine, address: int, inst: int, funct3: int, rd: 
 
             def execute_slliw(m: Machine) -> None:
                 m.set32(rd, m.get(rs1) << shamt)
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['slliw', r[rd], r[rs1], str(shamt)], execute_slliw)
 
@@ -996,14 +989,12 @@ def decode_alu_imm_w(labels: Machine, address: int, inst: int, funct3: int, rd: 
             if imm_high == 0x00:
                 def execute_srliw(m: Machine) -> None:
                     m.set32(rd, unsigned32(m.get(rs1)) >> shamt)
-                    m.set_pc(m.pc + 4)
 
                 return Instruction(address, inst, ['srliw', r[rd], r[rs1], str(shamt)], execute_srliw)
 
             elif imm_high == 0x20:
                 def execute_sraiw(m: Machine) -> None:
                     m.set32(rd, clip32(m.get(rs1)) >> shamt)
-                    m.set_pc(m.pc + 4)
 
                 return Instruction(address, inst, ['sraiw', r[rd], r[rs1], str(shamt)], execute_sraiw)
 
@@ -1018,14 +1009,12 @@ def decode_alu(address: int, inst: int, funct3: int, rd: int, rs1: int, rs2: int
         case 0x0000:
             def execute_add(m: Machine) -> None:
                 m.set(rd, m.get(rs1) + m.get(rs2))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['add', r[rd], r[rs1], r[rs2]], execute_add)
 
         case 0x2000:
             def execute_sub(m: Machine) -> None:
                 m.set(rd, m.get(rs1) - m.get(rs2))
-                m.set_pc(m.pc + 4)
 
             if r[rs1] == 'zero':
                 fields=['neg', r[rd], r[rs2]]
@@ -1037,14 +1026,12 @@ def decode_alu(address: int, inst: int, funct3: int, rd: int, rs1: int, rs2: int
         case 0x0001:
             def execute_sll(m: Machine) -> None:
                 m.set(rd, m.get(rs1) << (m.get(rs2) & 0x3f))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['sll', r[rd], r[rs1], r[rs2]], execute_sll)
 
         case 0x0002:
             def execute_slt(m: Machine) -> None:
                 m.set(rd, 1 if m.get(rs1) < m.get(rs2) else 0)
-                m.set_pc(m.pc + 4)
 
             if r[rs2] == 'zero':
                 fields=['sltz', r[rd], r[rs1]]
@@ -1058,7 +1045,6 @@ def decode_alu(address: int, inst: int, funct3: int, rd: int, rs1: int, rs2: int
         case 0x0003:
             def execute_sltu(m: Machine) -> None:
                 m.set(rd, 1 if unsigned(m.get(rs1)) < unsigned(m.get(rs2)) else 0)
-                m.set_pc(m.pc + 4)
 
             if r[rs1] == 'zero':
                 fields=['snez', r[rd], r[rs2]]
@@ -1070,63 +1056,54 @@ def decode_alu(address: int, inst: int, funct3: int, rd: int, rs1: int, rs2: int
         case 0x0004:
             def execute_xor(m: Machine) -> None:
                 m.set(rd, m.get(rs1) ^ m.get(rs2))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['xor', r[rd], r[rs1], r[rs2]], execute_xor)
 
         case 0x0005:
             def execute_srl(m: Machine) -> None:
                 m.set(rd, unsigned(m.get(rs1)) >> (m.get(rs2) & 0x3f))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['srl', r[rd], r[rs1], r[rs2]], execute_srl)
 
         case 0x2005:
             def execute_sra(m: Machine) -> None:
                 m.set(rd, m.get(rs1) >> (m.get(rs2) & 0x3f))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['sra', r[rd], r[rs1], r[rs2]], execute_sra)
 
         case 0x0006:
             def execute_or(m: Machine) -> None:
                 m.set(rd, m.get(rs1) | m.get(rs2))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['or', r[rd], r[rs1], r[rs2]], execute_or)
 
         case 0x0007:
             def execute_and(m: Machine) -> None:
                 m.set(rd, m.get(rs1) & m.get(rs2))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['and', r[rd], r[rs1], r[rs2]], execute_and)
 
         case 0x0100:
             def execute_mul(m: Machine) -> None:
                 m.set(rd, m.get(rs1) * m.get(rs2))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['mul', r[rd], r[rs1], r[rs2]], execute_mul)
 
         case 0x0101:
             def execute_mulh(m: Machine) -> None:
                 m.set(rd, (m.get(rs1) * m.get(rs2)) >> 64)
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['mulh', r[rd], r[rs1], r[rs2]], execute_mulh)
 
         case 0x0102:
             def execute_mulhsu(m: Machine) -> None:
                 m.set(rd, (m.get(rs1) * unsigned(m.get(rs2))) >> 64)
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['mulhsu', r[rd], r[rs1], r[rs2]], execute_mulhsu)
 
         case 0x0103:
             def execute_mulhu(m: Machine) -> None:
                 m.set(rd, (unsigned(m.get(rs1)) * unsigned(m.get(rs2))) >> 64)
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['mulhu', r[rd], r[rs1], r[rs2]], execute_mulhu)
 
@@ -1136,7 +1113,6 @@ def decode_alu(address: int, inst: int, funct3: int, rd: int, rs1: int, rs2: int
                     m.set(rd, -1)
                 else:
                     m.set(rd, int(m.get(rs1) / m.get(rs2)))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['div', r[rd], r[rs1], r[rs2]], execute_div)
 
@@ -1146,7 +1122,6 @@ def decode_alu(address: int, inst: int, funct3: int, rd: int, rs1: int, rs2: int
                     m.set(rd, -1)
                 else:
                     m.set(rd, unsigned(m.get(rs1)) // unsigned(m.get(rs2)))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['divu', r[rd], r[rs1], r[rs2]], execute_divu)
 
@@ -1156,7 +1131,6 @@ def decode_alu(address: int, inst: int, funct3: int, rd: int, rs1: int, rs2: int
                     m.set(rd, m.get(rs1))
                 else:
                     m.set(rd, m.get(rs1) - int(m.get(rs1) / m.get(rs2)) * m.get(rs2))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['rem', r[rd], r[rs1], r[rs2]], execute_rem)
 
@@ -1166,7 +1140,6 @@ def decode_alu(address: int, inst: int, funct3: int, rd: int, rs1: int, rs2: int
                     m.set(rd, m.get(rs1))
                 else:
                     m.set(rd, unsigned(m.get(rs1)) % unsigned(m.get(rs2)))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['remu', r[rd], r[rs1], r[rs2]], execute_remu)
 
@@ -1179,42 +1152,36 @@ def decode_alu_w(address: int, inst: int, funct3: int, rd: int, rs1: int, rs2: i
         case 0x0000:
             def execute_addw(m: Machine) -> None:
                 m.set32(rd, m.get(rs1) + m.get(rs2))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['addw', r[rd], r[rs1], r[rs2]], execute_addw)
 
         case 0x2000:
             def execute_subw(m: Machine) -> None:
                 m.set32(rd, m.get(rs1) - m.get(rs2))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['subw', r[rd], r[rs1], r[rs2]], execute_subw)
 
         case 0x0001:
             def execute_sllw(m: Machine) -> None:
                 m.set32(rd, m.get(rs1) << (m.get(rs2) & 0x1f))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['sllw', r[rd], r[rs1], r[rs2]], execute_sllw)
 
         case 0x0005:
             def execute_srlw(m: Machine) -> None:
                 m.set32(rd, unsigned32(m.get(rs1)) >> (m.get(rs2) & 0x1f))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['srlw', r[rd], r[rs1], r[rs2]], execute_srlw)
 
         case 0x2005:
             def execute_sraw(m: Machine) -> None:
                 m.set32(rd, clip32(m.get(rs1)) >> (m.get(rs2) & 0x1f))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['sraw', r[rd], r[rs1], r[rs2]], execute_sraw)
 
         case 0x0100:
             def execute_mulw(m: Machine) -> None:
                 m.set32(rd, m.get(rs1) * m.get(rs2))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['mulw', r[rd], r[rs1], r[rs2]], execute_mulw)
 
@@ -1224,7 +1191,6 @@ def decode_alu_w(address: int, inst: int, funct3: int, rd: int, rs1: int, rs2: i
                     m.set32(rd, -1)
                 else:
                     m.set32(rd, int(m.get(rs1) / m.get(rs2)))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['divw', r[rd], r[rs1], r[rs2]], execute_divw)
 
@@ -1234,7 +1200,6 @@ def decode_alu_w(address: int, inst: int, funct3: int, rd: int, rs1: int, rs2: i
                     m.set32(rd, -1)
                 else:
                     m.set32(rd, unsigned(m.get(rs1)) // unsigned(m.get(rs2)))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['divuw', r[rd], r[rs1], r[rs2]], execute_divuw)
 
@@ -1244,7 +1209,6 @@ def decode_alu_w(address: int, inst: int, funct3: int, rd: int, rs1: int, rs2: i
                     m.set32(rd, m.get(rs1))
                 else:
                     m.set32(rd, m.get(rs1) - int(m.get(rs1) / m.get(rs2)) * m.get(rs2))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['remw', r[rd], r[rs1], r[rs2]], execute_remw)
 
@@ -1254,7 +1218,6 @@ def decode_alu_w(address: int, inst: int, funct3: int, rd: int, rs1: int, rs2: i
                     m.set32(rd, m.get(rs1))
                 else:
                     m.set32(rd, unsigned(m.get(rs1)) % unsigned(m.get(rs2)))
-                m.set_pc(m.pc + 4)
 
             return Instruction(address, inst, ['remuw', r[rd], r[rs1], r[rs2]], execute_remuw)
 
@@ -1277,7 +1240,6 @@ def decode_ecall(address: int, inst: int) -> Instruction:
             m.set(10, len(read_res))
             m.effects.stdin = read_res
             m.stdin += read_res
-            m.set_pc(m.pc + 4)
             return
 
         if m.get(17) == 64:
@@ -1292,7 +1254,6 @@ def decode_ecall(address: int, inst: int) -> Instruction:
             m.set(10, len(buf))
             m.effects.stdout = buf
             m.stdout += buf
-            m.set_pc(m.pc + 4)
             return
 
         if m.get(17) == 93:
@@ -1312,7 +1273,6 @@ def find_instruction(instructions: list[Instruction], address: int) -> int:
     from_start = address - instructions[0].address
     span = instructions[-1].address - instructions[0].address
     i = (len(instructions) * from_start) // span
-    guess = i
 
     # now correct
     i = max(0, min(i, len(instructions) - 1))
@@ -1320,7 +1280,6 @@ def find_instruction(instructions: list[Instruction], address: int) -> int:
         i -= 1
     while instructions[i].address < address:
         i += 1
-    #print(f'guess: {guess}, actual: {i}, delta: {abs(guess-i)}')
     return i
 
 def pair_instructions(m: Machine, instructions: list[Instruction]) -> None:
@@ -1335,18 +1294,20 @@ def pair_instructions(m: Machine, instructions: list[Instruction]) -> None:
                 sym = m.address_label(addr)
 
                 # wrapper to capture snapshots of the needed values
-                def wrap_la(target_reg: int, value: int) -> Callable[[Machine], None]:
+                def wrap_la(target_reg: int, value: int, length: int) -> Callable[[Machine], None]:
                     def execute_la(m: Machine) -> None:
                         m.set(target_reg, value)
-                        m.set_pc(m.pc + 8)
+                        m.set_pc(m.pc + length)
                     return execute_la
 
                 # replace the auipc, addi sequence with la
+                length = instruction.length + instruction2.length
                 new_instruction = Instruction(
                     instruction.address, 
                     instruction.instruction << 32 | instruction2.instruction,
                     ['la', rd0, sym],
-                    wrap_la(r.index(rd), addr))
+                    wrap_la(r.index(rd), addr, length),
+                    length=length)
                 instructions[i] = new_instruction
                 del instructions[i+1]
             case (Instruction(fields=['auipc', rd0, imm0]),
@@ -1355,18 +1316,20 @@ def pair_instructions(m: Machine, instructions: list[Instruction]) -> None:
                 sym = m.address_label(addr)
 
                 # wrapper to capture snapshots of the needed values
-                def wrap_call(ra_reg: int, target_addr: int) -> Callable[[Machine], None]:
+                def wrap_call(ra_reg: int, target_addr: int, length: int) -> Callable[[Machine], None]:
                     def execute_call(m: Machine) -> None:
-                        m.set(ra_reg, m.pc + 8)
+                        m.set(ra_reg, m.pc + length)
                         m.set_pc(target_addr)
                     return execute_call
 
                 # replace the auipc, addi sequence with la
+                length = instruction.length + instruction2.length
                 new_instruction = Instruction(
                     instruction.address, 
                     instruction.instruction << 32 | instruction2.instruction,
                     ['call', sym],
-                    wrap_call(r.index(rd), addr))
+                    wrap_call(r.index(rd), addr, length),
+                    length=length)
                 instructions[i] = new_instruction
                 del instructions[i+1]
 
@@ -1450,12 +1413,10 @@ def add_labels(m: Machine, instructions: list[Instruction]) -> None:
             elif addr > instruction.address:
                 instruction.fields[-1] = f'{target_label}f'
 
-next_value_number = 32
-
 def pre_trace(m: Machine, instructions: list[Instruction], echo_out: bool, echo_in: bool, lint: bool) -> list[Effects]:
-    global next_value_number
     context_stack: list[tuple[list[int], list[bool], int]] = []
     entry_registers = list(range(32))
+    next_value_number = 32
     regs = list(entry_registers)
     valid = [True, False, True] + [False]*29
     entry_sp = m.x[2]
@@ -1477,6 +1438,8 @@ def pre_trace(m: Machine, instructions: list[Instruction], echo_out: bool, echo_
         except Fault as err:
             e.other_message = err.msg
             e.terminate = True
+        if e.pc == (0, 0):
+            m.set_pc(m.pc + instruction.length)
         m.effects = None
         sequence.append(e)
         if echo_out and e.stdout is not None:
@@ -1710,41 +1673,6 @@ def find_function_bounds(instructions: list[Instruction], pc_i: int) -> tuple[in
             break
     return (start_i, end_i)
 
-def render_line(instruction: Instruction, effects: Optional[Effects]) -> list[str]:
-    fields = list(instruction.fields)
-    if fields[-1][0] == '[':
-        comment = fields.pop()
-    else:
-        comment = ''
-    if len(fields) >= 3 and fields[-2] == '()':
-        if fields[-3] == '0':
-            parts = fields[1:-3] + [f'({fields[-1]})']
-        else:
-            parts = fields[1:-3] + [f'{fields[-3]}({fields[-1]})']
-    else:
-        parts = fields[1:]
-    if comment != '':
-        parts.append(comment)
-    disasm = f'{instruction.fields[0]:<8}' + ', '.join(parts)
-    if instruction.label is None:
-        addr_part = ''
-    else:
-        addr_part = instruction.label + ':'
-    result = [f'{addr_part:<16}{disasm:<48}']
-    if effects is None:
-        return result
-
-    result[0] += report_effects(effects)
-
-    if effects.other_message is not None:
-        result.append(f'{"":20}{effects.other_message}')
-    if effects.stdin is not None:
-        result.append(f'{"":20}{repr(effects.stdin.decode())}')
-    if effects.stdout is not None:
-        result.append(f'{"":20}{repr(effects.stdout.decode())}')
-
-    return result
-
 def calc_range(length: int, cursor: int, window_size: int) -> tuple[int, int]:
     half = (window_size - 1) // 2
     start = cursor - half
@@ -1765,7 +1693,7 @@ def ui(m: Machine, instructions: list[Instruction], sequence: list[Effects]) -> 
     if not sys.stdin.isatty():
         sys.stdin.close()
         os.close(0)
-        sys.stdin = open('CON' if os.name == 'nt' else '/dev/tty', 'r')
+        sys.stdin = open('/dev/tty', 'r')
 
     # take over terminal
     stdscr = curses.initscr()
@@ -1878,7 +1806,7 @@ def ui(m: Machine, instructions: list[Instruction], sequence: list[Effects]) -> 
             out_top = reg_top + reg_y + 1
 
         # source/text view
-        status_line = ' Text '[:src_x-2]
+        status_line = f' Step {seq_i+1}/{len(sequence)} PC:{instructions[pc_i].address:x} '
         stdscr.addstr(src_top-1, 2, status_line)
 
         # draw arrows for taken branches
@@ -1902,6 +1830,7 @@ def ui(m: Machine, instructions: list[Instruction], sequence: list[Effects]) -> 
                 effects.pc[0] if is_back else effects.pc[1])
 
         (start, _) = calc_range(len(instructions), cursor_i, src_y)
+        extra = ''
         for i in range(src_y):
             i_i = start + i
             if 0 <= i_i < len(instructions):
@@ -1916,19 +1845,25 @@ def ui(m: Machine, instructions: list[Instruction], sequence: list[Effects]) -> 
                     arrow = [curses.ACS_VLINE]
                 if i_i == pc_i:
                     effects = sequence[seq_i]
-                    lines = render_line(instruction, effects)
+                    line = instruction.render()
+                    lines = effects.report()[:2]
+                    if lines[0] == '':
+                        del(lines[0])
+                    extra = ', '.join(lines)
+                    if extra != '':
+                        extra = f' {extra} '
                     color = curses.color_pair(1)
                 else:
-                    lines = render_line(instruction, None)
+                    line = instruction.render()
                     if i_i == cursor_i:
                         color = curses.color_pair(2)
                     else:
                         color = curses.color_pair(0)
             else:
-                lines = ['']
+                line = ''
                 color = curses.color_pair(0)
                 
-            stdscr.addstr(src_top+i, 1, lines[0][:src_x].ljust(src_x), color)
+            stdscr.addstr(src_top+i, 1, line[:src_x].ljust(src_x), color)
             for (j, ch) in enumerate(arrow):
                 stdscr.addch(src_top+i, 1+12+j, ch, color)
 
@@ -2075,8 +2010,8 @@ def ui(m: Machine, instructions: list[Instruction], sequence: list[Effects]) -> 
             for (i, line) in enumerate(lines):
                 stdscr.addstr(out_top+i, 1, line[:reg_x])
 
-        status_line = f' Step {seq_i+1}/{len(sequence)} PC:{instructions[pc_i].address:x} '[:size_x-4]
-        stdscr.addstr(size_y-1, 2, status_line)
+        if extra != '':
+            stdscr.addstr(size_y-1, 2, extra[:size_x-4])
         stdscr.refresh()
 
     resize()
@@ -2088,14 +2023,14 @@ def ui(m: Machine, instructions: list[Instruction], sequence: list[Effects]) -> 
         stdscr.nodelay(not block)
         key = stdscr.getch()
         if key == curses.KEY_RIGHT and seq_i+1 < len(sequence):
-            apply(m, sequence[seq_i], True)
+            m.apply(sequence[seq_i], True)
             seq_i += 1
             m.set_most_recent_memory(sequence, seq_i)
             pc_i = find_instruction(instructions, sequence[seq_i].instruction.address)
             cursor_i = pc_i
         elif key == curses.KEY_LEFT and seq_i > 0:
             seq_i -= 1
-            apply(m, sequence[seq_i], False)
+            m.apply(sequence[seq_i], False)
             m.set_most_recent_memory(sequence, seq_i)
             pc_i = find_instruction(instructions, sequence[seq_i].instruction.address)
             cursor_i = pc_i
@@ -2113,7 +2048,7 @@ def ui(m: Machine, instructions: list[Instruction], sequence: list[Effects]) -> 
                 if find_instruction(instructions, sequence[peek].instruction.address) == cursor_i:
                     # play the sequence forward to this point
                     for seq_i in range(seq_i, peek):
-                        apply(m, sequence[seq_i], True)
+                        m.apply(sequence[seq_i], True)
                     seq_i += 1
                     m.set_most_recent_memory(sequence, seq_i)
                     pc_i = find_instruction(instructions, sequence[seq_i].instruction.address)
@@ -2125,7 +2060,7 @@ def ui(m: Machine, instructions: list[Instruction], sequence: list[Effects]) -> 
                 if find_instruction(instructions, sequence[peek].instruction.address) == cursor_i:
                     # play the sequence backward to this point
                     for seq_i in range(seq_i-1, peek-1, -1):
-                        apply(m, sequence[seq_i], False)
+                        m.apply(sequence[seq_i], False)
                     m.set_most_recent_memory(sequence, seq_i)
                     pc_i = find_instruction(instructions, sequence[seq_i].instruction.address)
                     cursor_i = pc_i
@@ -2141,7 +2076,7 @@ def ui(m: Machine, instructions: list[Instruction], sequence: list[Effects]) -> 
                 if first:
                     first = False
                 else:
-                    apply(m, sequence[seq_i], False)
+                    m.apply(sequence[seq_i], False)
                 if func_start_i <= pc_i < func_end_i and (seq_i == 0 or sequence[seq_i-1].instruction.fields[0] == 'call'):
                     break
             m.set_most_recent_memory(sequence, seq_i)
@@ -2153,7 +2088,7 @@ def ui(m: Machine, instructions: list[Instruction], sequence: list[Effects]) -> 
                 cursor_i = pc_i
                 if func_start_i <= pc_i < func_end_i and sequence[seq_i].instruction.fields[0] == 'ret':
                     break
-                apply(m, sequence[seq_i], True)
+                m.apply(sequence[seq_i], True)
             m.set_most_recent_memory(sequence, seq_i)
 
         elif key == curses.KEY_RESIZE:
@@ -2204,13 +2139,7 @@ def main() -> None:
     if args.mode == 'dasm':
         for pc in range(m.text_start, m.text_end, 4):
             instruction = instructions[pc]
-            line = render_line(instruction, None)[0]
-            #disasm = f'{instruction.fields[0]:<8}' + ', '.join(instruction.fields[1:])
-            #if instruction.label is None:
-            #    addr_part = ''
-            #else:
-            #    addr_part = instruction.label + ':'
-            #line = f'{addr_part:<20}{disasm:<48}'
+            line = instruction.render()
             print(line)
         return
 
@@ -2224,8 +2153,9 @@ def main() -> None:
 
     if args.mode == 'trace':
         for effects in sequence:
-            for line in render_line(effects.instruction, effects):
-                print(line)
+            print(effects.instruction.render(), end='')
+            for line in effects.report():
+                print(f'{"":16}{line}')
 
     if args.mode == 'debug':
         # reload to reset memory state
