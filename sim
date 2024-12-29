@@ -636,7 +636,7 @@ def decode_jal(labels: Machine, address: int, inst: int, rd: int, imm: int) -> I
     if r[rd] == 'zero':
         fields = ['j', dest]
     elif r[rd] == 'ra':
-        fields = ['call', dest]
+        fields = ['jal', dest]
     else:
         fields = ['jal', r[rd], dest]
     return Instruction(address, inst, fields, execute_jal,
@@ -1424,7 +1424,8 @@ def pre_trace(m: Machine, instructions: list[Instruction], echo_out: bool, echo_
 
     sequence = []
     i = -1
-    while True:
+    max_steps = 100000
+    while len(sequence) < max_steps:
         # fetch the next instruction
         i += 1
         if i >= len(instructions) or instructions[i].address != m.pc:
@@ -1658,6 +1659,10 @@ def pre_trace(m: Machine, instructions: list[Instruction], echo_out: bool, echo_
             e.other_message = err.msg
             e.terminate = True
             break
+
+    if len(sequence) >= max_steps:
+        e.other_message = f'stopped after {max_steps} steps'
+        e.terminate = True
 
     return sequence
 
@@ -2118,8 +2123,8 @@ def main() -> None:
     parser.add_argument('-e', '--executable',
         default='a.out')
     parser.add_argument('-l', '--lint',
-        choices=['True', 'False'],
-        default='True')
+        choices=['true', 'false'],
+        default='true')
     args = parser.parse_args()
 
     # load the program from disk and form the
@@ -2137,8 +2142,7 @@ def main() -> None:
     add_labels(m, instructions)
 
     if args.mode == 'dasm':
-        for pc in range(m.text_start, m.text_end, 4):
-            instruction = instructions[pc]
+        for instruction in instructions:
             line = instruction.render()
             print(line)
         return
@@ -2149,7 +2153,7 @@ def main() -> None:
     sequence = pre_trace(m, instructions,
         args.mode in ('run', 'debug'),
         args.mode == 'debug',
-        args.lint == 'True')
+        args.lint == 'true')
 
     if args.mode == 'trace':
         for effects in sequence:
