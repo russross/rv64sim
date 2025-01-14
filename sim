@@ -1322,7 +1322,7 @@ def pair_instructions(m: Machine, instructions: list[Instruction]) -> None:
                         m.set_pc(target_addr)
                     return execute_call
 
-                # replace the auipc, addi sequence with la
+                # replace the auipc, jalr sequence with call
                 length = instruction.length + instruction2.length
                 new_instruction = Instruction(
                     instruction.address, 
@@ -1491,7 +1491,7 @@ def pre_trace(m: Machine, instructions: list[Instruction], echo_out: bool, echo_
 
                     # must call named function
                     if e.pc[1] not in m.address_symbols:
-                        raise Fault('{instruction.fields[0]} to unlabeled address')
+                        raise Fault(f'{instruction.fields[0]} to unlabeled address')
                     name = m.address_symbols[e.pc[1]]
 
                     # push old register context and clone it as starting point
@@ -1837,11 +1837,11 @@ def ui(m: Machine, instructions: list[Instruction], sequence: list[Effects]) -> 
         (start, _) = calc_range(len(instructions), cursor_i, src_y)
         extra = ''
         for i in range(src_y):
+            arrow = []
             i_i = start + i
             if 0 <= i_i < len(instructions):
                 instruction = instructions[i_i]
                 addr = instruction.address
-                arrow = []
                 if addr == arrow_top_addr:
                     arrow = arrow_top
                 elif addr == arrow_bottom_addr:
