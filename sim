@@ -9,7 +9,7 @@ import os
 import re
 import sys
 import struct
-from typing import Callable, Optional, TypeAlias
+from typing import Callable, Optional
 
 STACK_SIZE = 4096
 
@@ -123,17 +123,17 @@ class Machine:
             if stack and data:
                 break
 
-    def load(self, addr: int, size: int) -> bytes:
-        for segment in self.segments:
-            if segment.in_range(addr, size):
-                return segment.load(addr, size, self.effects)
-        raise Fault(f'segfault: load addr={addr:x} size={size}')
-
     def is_valid_addr(self, addr: int) -> bool:
         for segment in self.segments:
             if segment.in_range(addr, 1):
                 return True
         return False
+
+    def load(self, addr: int, size: int) -> bytes:
+        for segment in self.segments:
+            if segment.in_range(addr, size):
+                return segment.load(addr, size, self.effects)
+        raise Fault(f'segfault: load addr={addr:x} size={size}')
 
     def load_int(self, addr: int, size: int, signed: bool = True) -> int:
         raw = self.load(addr, size)
@@ -273,8 +273,6 @@ class MemoryValue:
 class RegisterValue:
     register: int
     value: int
-
-Value: TypeAlias = MemoryValue | RegisterValue
 
 @dataclasses.dataclass
 class Effects:
@@ -1413,7 +1411,7 @@ def add_labels(m: Machine, instructions: list[Instruction]) -> None:
             elif addr > instruction.address:
                 instruction.fields[-1] = f'{target_label}f'
 
-def pre_trace(m: Machine, instructions: list[Instruction], echo_out: bool, echo_in: bool, lint: bool) -> list[Effects]:
+def pre_trace(m: Machine, instructions: list[Instruction], echo_out: bool, echo_in: bool, lint: bool, max_steps: int) -> list[Effects]:
     context_stack: list[tuple[list[int], list[bool], int]] = []
     entry_registers = list(range(32))
     next_value_number = 32
@@ -1424,7 +1422,6 @@ def pre_trace(m: Machine, instructions: list[Instruction], echo_out: bool, echo_
 
     sequence = []
     i = -1
-    max_steps = 100000
     while len(sequence) < max_steps:
         # fetch the next instruction
         i += 1
@@ -2082,7 +2079,7 @@ def ui(m: Machine, instructions: list[Instruction], sequence: list[Effects]) -> 
                     first = False
                 else:
                     m.apply(sequence[seq_i], False)
-                if func_start_i <= pc_i < func_end_i and (seq_i == 0 or sequence[seq_i-1].instruction.fields[0] == 'call'):
+                if func_start_i <= pc_i < func_end_i and (seq_i == 0 or sequence[seq_i-1].instruction.fields[0] in ('call', 'jal')):
                     break
             m.set_most_recent_memory(sequence, seq_i)
         elif key == curses.KEY_END:
@@ -2153,7 +2150,9 @@ def main() -> None:
     sequence = pre_trace(m, instructions,
         args.mode in ('run', 'debug'),
         args.mode == 'debug',
-        args.lint == 'true')
+        args.lint == 'true',
+        10000000,
+        )
 
     if args.mode == 'trace':
         for effects in sequence:
