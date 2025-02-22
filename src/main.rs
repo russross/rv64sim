@@ -1,13 +1,13 @@
 pub mod ui;
 
-use crossterm::tty::IsTty;
 use self::ui::*;
+use crossterm::tty::IsTty;
 use std::cmp::min;
 use std::collections::HashMap;
 use std::fmt::{self, Write as FmtWrite};
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::unix::io::{AsRawFd};
+use std::os::unix::io::AsRawFd;
 use std::rc::Rc;
 
 const STACK_SIZE: i64 = 4096;
@@ -36,7 +36,7 @@ impl Segment {
     }
 
     fn in_range(&self, addr: i64, size: i64) -> bool {
-        addr >= self.start && addr+size <= self.end
+        addr >= self.start && addr + size <= self.end
     }
 
     fn reset(&mut self) {
@@ -46,10 +46,13 @@ impl Segment {
 
     fn load(&self, addr: i64, size: i64, effects: &mut Option<Effects>) -> &[u8] {
         assert!(self.in_range(addr, size));
-        let raw = &self.mem[(addr - self.start) as usize .. (addr+size - self.start) as usize];
+        let raw = &self.mem[(addr - self.start) as usize..(addr + size - self.start) as usize];
         if let Some(effects) = effects {
             assert!(effects.mem_read.is_none());
-            effects.mem_read = Some(MemoryValue { address: addr, value: raw.to_vec() });
+            effects.mem_read = Some(MemoryValue {
+                address: addr,
+                value: raw.to_vec(),
+            });
         }
         raw
     }
@@ -61,8 +64,14 @@ impl Segment {
             assert!(effects.mem_write.is_none());
             let old_val = self.mem[offset..offset + raw.len()].to_vec();
             effects.mem_write = Some((
-                MemoryValue { address: addr, value: old_val },
-                MemoryValue { address: addr, value: raw.to_vec() }
+                MemoryValue {
+                    address: addr,
+                    value: old_val,
+                },
+                MemoryValue {
+                    address: addr,
+                    value: raw.to_vec(),
+                },
             ));
         }
         self.mem[offset..offset + raw.len()].copy_from_slice(raw);
@@ -93,83 +102,89 @@ pub struct Machine {
 }
 
 impl Machine {
-   fn new(
-       mut segments: Vec<Segment>,
-       pc_start: i64,
-       global_pointer: i64,
-       address_symbols: HashMap<i64, String>,
-       other_symbols: HashMap<String, i64>,
-   ) -> Self {
-       let mut stack_start = 0x100000 - STACK_SIZE;
-       for segment in &segments {
-           if segment.end + STACK_SIZE >= stack_start {
-               stack_start = (segment.end + STACK_SIZE*2 - 1) & (STACK_SIZE-1);
-           }
-       }
-       
-       let stack_end = stack_start + STACK_SIZE;
-       let mut data_start = stack_end - 8;
-       let mut data_end = 0;
-       let mut text_start = stack_end;
-       let mut text_end = 0;
-       
-       for segment in &segments {
-           if segment.executable {
-               text_start = text_start.min(segment.start);
-               text_end = text_end.max(segment.end);
-           } else {
-               data_start = data_start.min(segment.start);
-               data_end = data_end.max(segment.end);
-           }
-       }
-       
-       if data_end == 0 {
-           data_end = data_start;
-       }
-       
-       segments.push(Segment::new(stack_start, stack_end, true, false, Vec::new()));
-       
-       let mut machine = Self {
-           segments,
-           pc_start,
-           global_pointer,
-           address_symbols,
-           other_symbols,
-           stack_start,
-           stack_end,
-           data_start,
-           data_end,
-           text_start,
-           text_end,
-           x: [0; 32],
-           pc: pc_start,
-           stdout: Vec::new(),
-           stdin: Vec::new(),
-           stack_frames: Vec::new(),
-           effects: None,
-           most_recent_memory: 0,
-           most_recent_data: (0, 0),
-           most_recent_stack: (0, 0),
-       };
-       
-       machine.reset();
-       machine
-   }
+    fn new(
+        mut segments: Vec<Segment>,
+        pc_start: i64,
+        global_pointer: i64,
+        address_symbols: HashMap<i64, String>,
+        other_symbols: HashMap<String, i64>,
+    ) -> Self {
+        let mut stack_start = 0x100000 - STACK_SIZE;
+        for segment in &segments {
+            if segment.end + STACK_SIZE >= stack_start {
+                stack_start = (segment.end + STACK_SIZE * 2 - 1) & (STACK_SIZE - 1);
+            }
+        }
 
-   fn reset(&mut self) {
-       for segment in &mut self.segments {
-           segment.reset();
-       }
-       
-       self.x = [0; 32];
-       self.x[2] = self.stack_end;
-       self.pc = self.pc_start;
-       
-       self.stdout.clear();
-       self.stdin.clear();
-       self.stack_frames.clear();
-       self.effects = None;
-   }
+        let stack_end = stack_start + STACK_SIZE;
+        let mut data_start = stack_end - 8;
+        let mut data_end = 0;
+        let mut text_start = stack_end;
+        let mut text_end = 0;
+
+        for segment in &segments {
+            if segment.executable {
+                text_start = text_start.min(segment.start);
+                text_end = text_end.max(segment.end);
+            } else {
+                data_start = data_start.min(segment.start);
+                data_end = data_end.max(segment.end);
+            }
+        }
+
+        if data_end == 0 {
+            data_end = data_start;
+        }
+
+        segments.push(Segment::new(
+            stack_start,
+            stack_end,
+            true,
+            false,
+            Vec::new(),
+        ));
+
+        let mut machine = Self {
+            segments,
+            pc_start,
+            global_pointer,
+            address_symbols,
+            other_symbols,
+            stack_start,
+            stack_end,
+            data_start,
+            data_end,
+            text_start,
+            text_end,
+            x: [0; 32],
+            pc: pc_start,
+            stdout: Vec::new(),
+            stdin: Vec::new(),
+            stack_frames: Vec::new(),
+            effects: None,
+            most_recent_memory: 0,
+            most_recent_data: (0, 0),
+            most_recent_stack: (0, 0),
+        };
+
+        machine.reset();
+        machine
+    }
+
+    fn reset(&mut self) {
+        for segment in &mut self.segments {
+            segment.reset();
+        }
+
+        self.x = [0; 32];
+        self.x[2] = self.stack_end;
+        self.pc = self.pc_start;
+
+        self.stdout.clear();
+        self.stdin.clear();
+        self.stack_frames.clear();
+        self.effects = None;
+    }
 
     fn set_most_recent_memory(&mut self, sequence: &[Effects], seq_i: usize) {
         self.most_recent_memory = if self.data_start > 0 {
@@ -214,7 +229,7 @@ impl Machine {
         }
     }
 
-   fn load(&mut self, addr: i64, size: i64) -> Result<Vec<u8>, String> {
+    fn load(&mut self, addr: i64, size: i64) -> Result<Vec<u8>, String> {
         for segment in &self.segments {
             if segment.in_range(addr, size) {
                 let raw = segment.load(addr, size, &mut self.effects);
@@ -267,7 +282,10 @@ impl Machine {
                 return Ok(i32::from_le_bytes(raw.try_into().unwrap()));
             }
         }
-        Err(format!("segfault: instruction fetch addr={:#x} size={}", addr, size))
+        Err(format!(
+            "segfault: instruction fetch addr={:#x} size={}",
+            addr, size
+        ))
     }
 
     fn store(&mut self, addr: i64, raw: &[u8]) -> Result<(), String> {
@@ -281,64 +299,74 @@ impl Machine {
         Err(format!("segfault: store addr={:#x} size={}", addr, size))
     }
 
-   fn get(&mut self, reg: usize) -> i64 {
-       if reg != 0 && self.effects.is_some() {
-           let effects = self.effects.as_mut().unwrap();
-           if !effects.reg_reads.iter().any(|r| r.register == reg) {
-               effects.reg_reads.push(RegisterValue { 
-                   register: reg, 
-                   value: self.x[reg] 
-               });
-           }
-       }
-       self.x[reg]
-   }
+    fn get(&mut self, reg: usize) -> i64 {
+        if reg != 0 && self.effects.is_some() {
+            let effects = self.effects.as_mut().unwrap();
+            if !effects.reg_reads.iter().any(|r| r.register == reg) {
+                effects.reg_reads.push(RegisterValue {
+                    register: reg,
+                    value: self.x[reg],
+                });
+            }
+        }
+        self.x[reg]
+    }
 
-   fn set(&mut self, reg: usize, value: i64) {
-       // zero register never changes
-       if reg != 0 {
-           if let Some(effects) = &mut self.effects {
-               assert!(effects.reg_write.is_none());
-               effects.reg_write = Some((
-                   RegisterValue { register: reg, value: self.x[reg] },
-                   RegisterValue { register: reg, value }
-               ));
-           }
-           self.x[reg] = value;
-       }
-   }
+    fn set(&mut self, reg: usize, value: i64) {
+        // zero register never changes
+        if reg != 0 {
+            if let Some(effects) = &mut self.effects {
+                assert!(effects.reg_write.is_none());
+                effects.reg_write = Some((
+                    RegisterValue {
+                        register: reg,
+                        value: self.x[reg],
+                    },
+                    RegisterValue {
+                        register: reg,
+                        value,
+                    },
+                ));
+            }
+            self.x[reg] = value;
+        }
+    }
 
-   fn set32(&mut self, reg: usize, value: i64) {
-       let value = (value as i32) as i64;
-       // zero register never changes
-       if reg != 0 {
-           if let Some(effects) = &mut self.effects {
-               assert!(effects.reg_write.is_none());
-               effects.reg_write = Some((
-                   RegisterValue { register: reg, value: self.x[reg] },
-                   RegisterValue { register: reg, value }
-               ));
-           }
-           self.x[reg] = value;
-       }
-   }
+    fn set32(&mut self, reg: usize, value: i64) {
+        let value = (value as i32) as i64;
+        // zero register never changes
+        if reg != 0 {
+            if let Some(effects) = &mut self.effects {
+                assert!(effects.reg_write.is_none());
+                effects.reg_write = Some((
+                    RegisterValue {
+                        register: reg,
+                        value: self.x[reg],
+                    },
+                    RegisterValue {
+                        register: reg,
+                        value,
+                    },
+                ));
+            }
+            self.x[reg] = value;
+        }
+    }
 
-   fn set_pc(&mut self, value: i64) -> Result<(), String> {
-       let old_pc = self.pc;
-       self.pc = value;
-       if self.pc & 1 != 0 {
-           return Err(format!("bus error: pc addr={}", self.pc));
-       }
-       if let Some(effects) = &mut self.effects {
-           effects.pc = (old_pc, self.pc);
-       }
-       Ok(())
-   }
+    fn set_pc(&mut self, value: i64) -> Result<(), String> {
+        let old_pc = self.pc;
+        self.pc = value;
+        if self.pc & 1 != 0 {
+            return Err(format!("bus error: pc addr={}", self.pc));
+        }
+        if let Some(effects) = &mut self.effects {
+            effects.pc = (old_pc, self.pc);
+        }
+        Ok(())
+    }
 
     fn address_label(&self, addr: i64) -> Option<String> {
-        self.address_symbols
-            .get(&addr)
-            .cloned()
+        self.address_symbols.get(&addr).cloned()
     }
 
     fn execute_and_collect_effects(&mut self, instruction: &Rc<Instruction>) -> Effects {
@@ -346,7 +374,7 @@ impl Machine {
         self.effects = Some(Effects::new(instruction));
 
         // execute the instruction
-        if let Err(msg)  = instruction.execute.as_ref()(self) {
+        if let Err(msg) = instruction.execute.as_ref()(self) {
             let mut effects = self.effects.take().unwrap();
             effects.error(msg);
             return effects;
@@ -417,17 +445,17 @@ impl Machine {
     }
 }
 
-type ExecuteFn = Box<dyn Fn(&mut Machine) -> Result<(),String>>;
+type ExecuteFn = Box<dyn Fn(&mut Machine) -> Result<(), String>>;
 
 #[allow(unused)]
 #[derive(Clone)]
 enum Field {
-    Opcode (&'static str),
-    Reg (usize),
-    Imm (i64),
-    Indirect (i64, usize),
-    Addr (Option<String>, i64),
-    LocalBranchTarget (usize, bool, i64),
+    Opcode(&'static str),
+    Reg(usize),
+    Imm(i64),
+    Indirect(i64, usize),
+    Addr(Option<String>, i64),
+    LocalBranchTarget(usize, bool, i64),
     Fence,
 }
 
@@ -436,18 +464,35 @@ impl Field {
         match self {
             Field::Opcode(inst) => inst.to_string(),
             Field::Reg(reg) => R[*reg].to_string(),
-            &Field::Imm(n) => if hex && !(0..=9).contains(&n) { format!("{:#x}", n) } else { format!("{}", n) },
+            &Field::Imm(n) => {
+                if hex && !(0..=9).contains(&n) {
+                    format!("{:#x}", n)
+                } else {
+                    format!("{}", n)
+                }
+            }
             Field::Indirect(0, reg) => format!("({})", R[*reg]),
-            Field::Indirect(imm, reg) => if hex { format!("{:#x}({})", imm, R[*reg]) } else { format!("{}({})", imm, R[*reg]) },
+            Field::Indirect(imm, reg) => {
+                if hex {
+                    format!("{:#x}({})", imm, R[*reg])
+                } else {
+                    format!("{}({})", imm, R[*reg])
+                }
+            }
             Field::Addr(Some(label), _) => label.to_string(),
-            Field::Addr(None, addr) => if hex { format!("{:#x}", addr) } else { format!("{}", addr) },
+            Field::Addr(None, addr) => {
+                if hex {
+                    format!("{:#x}", addr)
+                } else {
+                    format!("{}", addr)
+                }
+            }
             Field::LocalBranchTarget(n, true, _) => format!("{}f", n),
             Field::LocalBranchTarget(n, false, _) => format!("{}b", n),
             Field::Fence => "*".to_string(),
         }
     }
 }
-
 
 #[allow(unused)]
 pub struct Instruction {
@@ -478,12 +523,18 @@ impl Instruction {
     }
 
     fn branches(&self) -> bool {
-        matches!((self.fields.last(), self.static_target, self.return_target),
-            (Some(Field::LocalBranchTarget (_,_,_)), Some(_), None))
+        matches!(
+            (self.fields.last(), self.static_target, self.return_target),
+            (Some(Field::LocalBranchTarget(_, _, _)), Some(_), None)
+        )
     }
 
     fn to_string(&self, hex: bool) -> String {
-        let operands = self.fields[1..].iter().map(|elt| elt.to_string(hex)).collect::<Vec<_>>().join(", ");
+        let operands = self.fields[1..]
+            .iter()
+            .map(|elt| elt.to_string(hex))
+            .collect::<Vec<_>>()
+            .join(", ");
         let disasm = format!("{:<8}{}", self.fields[0].to_string(hex), operands);
         let addr_part = if let Some(label) = &self.label {
             format!("{}:", label)
@@ -546,7 +597,14 @@ impl Effects {
 
     fn report(&self, hex_mode: bool) -> Vec<String> {
         let mut parts = Vec::new();
-        if let Some((_, RegisterValue { register: rd, value: val })) = self.reg_write {
+        if let Some((
+            _,
+            RegisterValue {
+                register: rd,
+                value: val,
+            },
+        )) = self.reg_write
+        {
             if hex_mode {
                 parts.push(format!("{} <- {:#x}", R[rd], val));
             } else {
@@ -586,17 +644,22 @@ fn load_elf(filename: &str) -> Result<Machine, String> {
     if raw.len() < 0x40 {
         return Err(format!("{filename} is too short"));
     }
-if raw[0..4] != *b"\x7fELF" {
+    if raw[0..4] != *b"\x7fELF" {
         return Err(format!("{filename} does not have ELF magic number"));
     }
     if raw[4] != 2 || raw[5] != 1 || raw[6] != 1 || raw[7] != 0 {
-        return Err(format!("{filename} is not a 64-bit, little-endian, version 1, System V ABI ELF file"));
+        return Err(format!(
+            "{filename} is not a 64-bit, little-endian, version 1, System V ABI ELF file"
+        ));
     }
 
-    if u16::from_le_bytes(raw[0x10..0x12].try_into().unwrap()) != 2 ||
-        u16::from_le_bytes(raw[0x12..0x14].try_into().unwrap()) != 0xf3 ||
-        u32::from_le_bytes(raw[0x14..0x18].try_into().unwrap()) != 1 {
-        return Err(format!("{filename} is not an executable, RISC-V, ELF version 1 file"));
+    if u16::from_le_bytes(raw[0x10..0x12].try_into().unwrap()) != 2
+        || u16::from_le_bytes(raw[0x12..0x14].try_into().unwrap()) != 0xf3
+        || u32::from_le_bytes(raw[0x14..0x18].try_into().unwrap()) != 1
+    {
+        return Err(format!(
+            "{filename} is not an executable, RISC-V, ELF version 1 file"
+        ));
     }
 
     let e_entry = i64::from_le_bytes(raw[0x18..0x20].try_into().unwrap());
@@ -619,11 +682,11 @@ if raw[0..4] != *b"\x7fELF" {
     let mut chunks = Vec::new();
     for i in 0..e_phnum {
         // unpack the program header
-        let start = e_phoff + e_phentsize*i;
+        let start = e_phoff + e_phentsize * i;
         if start + e_phentsize > raw.len() {
             return Err(format!("{filename} program header entry {i} out of range"));
         }
-        let header = &raw[start..start+e_phentsize];
+        let header = &raw[start..start + e_phentsize];
         let p_type = u32::from_le_bytes(header[0x00..0x04].try_into().unwrap());
         //let p_flags = u32::from_le_bytes(header[0x04..0x08].try_into().unwrap());
         let p_offset = i64::from_le_bytes(header[0x08..0x10].try_into().unwrap());
@@ -642,16 +705,21 @@ if raw[0..4] != *b"\x7fELF" {
         if (p_offset + p_filesz) as usize > raw.len() {
             return Err(format!("{filename} program segment {i} out of range"));
         }
-        let chunk = (p_vaddr, raw[p_offset as usize..(p_offset+p_filesz) as usize].to_vec());
+        let chunk = (
+            p_vaddr,
+            raw[p_offset as usize..(p_offset + p_filesz) as usize].to_vec(),
+        );
         chunks.push(chunk);
     }
 
     // get the section header strings
-    let start = e_shoff + e_shentsize*e_shstrndx;
+    let start = e_shoff + e_shentsize * e_shstrndx;
     if start + e_shentsize > raw.len() {
-        return Err(format!("{filename} section header string table entry out of range"));
+        return Err(format!(
+            "{filename} section header string table entry out of range"
+        ));
     }
-    let header = &raw[start..start+e_shentsize];
+    let header = &raw[start..start + e_shentsize];
     //let sh_name = u32::from_le_bytes(header[0x00..0x04].try_into().unwrap());
     //let sh_type = u32::from_le_bytes(header[0x04..0x08].try_into().unwrap());
     //let sh_flags = u64::from_le_bytes(header[0x08..0x10].try_into().unwrap());
@@ -664,7 +732,9 @@ if raw[0..4] != *b"\x7fELF" {
     //let sh_entsize = i64::from_le_bytes(header[0x38..0x40].try_into().unwrap());
 
     if sh_offset + sh_size > raw.len() {
-        return Err(format!("{filename} section header string table out of range"));
+        return Err(format!(
+            "{filename} section header string table out of range"
+        ));
     }
 
     // unpack the strings, keyed by offset
@@ -686,60 +756,71 @@ if raw[0..4] != *b"\x7fELF" {
     let mut segments = Vec::new();
 
     for i in 0..e_shnum {
-       let start = e_shoff + e_shentsize*i;
-       if start + e_shentsize > raw.len() {
-           return Err(format!("{filename} section header {i} out of range"));
-       }
+        let start = e_shoff + e_shentsize * i;
+        if start + e_shentsize > raw.len() {
+            return Err(format!("{filename} section header {i} out of range"));
+        }
 
-       // unpack the section header
-       let header = &raw[start..start+e_shentsize];
-       let sh_name = u32::from_le_bytes(header[0x00..0x04].try_into().unwrap()) as usize;
-       let sh_type = u32::from_le_bytes(header[0x04..0x08].try_into().unwrap());
-       let sh_flags = u64::from_le_bytes(header[0x08..0x10].try_into().unwrap());
-       let sh_addr = i64::from_le_bytes(header[0x10..0x18].try_into().unwrap());
-       let sh_offset = u64::from_le_bytes(header[0x18..0x20].try_into().unwrap()) as usize;
-       let sh_size = u64::from_le_bytes(header[0x20..0x28].try_into().unwrap()) as usize;
-       //let sh_link = u32::from_le_bytes(header[0x28..0x2C].try_into().unwrap());
-       //let sh_info = u32::from_le_bytes(header[0x2C..0x30].try_into().unwrap());
-       //let sh_addralign = u64::from_le_bytes(header[0x30..0x38].try_into().unwrap());
-       //let sh_entsize = u64::from_le_bytes(header[0x38..0x40].try_into().unwrap());
+        // unpack the section header
+        let header = &raw[start..start + e_shentsize];
+        let sh_name = u32::from_le_bytes(header[0x00..0x04].try_into().unwrap()) as usize;
+        let sh_type = u32::from_le_bytes(header[0x04..0x08].try_into().unwrap());
+        let sh_flags = u64::from_le_bytes(header[0x08..0x10].try_into().unwrap());
+        let sh_addr = i64::from_le_bytes(header[0x10..0x18].try_into().unwrap());
+        let sh_offset = u64::from_le_bytes(header[0x18..0x20].try_into().unwrap()) as usize;
+        let sh_size = u64::from_le_bytes(header[0x20..0x28].try_into().unwrap()) as usize;
+        //let sh_link = u32::from_le_bytes(header[0x28..0x2C].try_into().unwrap());
+        //let sh_info = u32::from_le_bytes(header[0x2C..0x30].try_into().unwrap());
+        //let sh_addralign = u64::from_le_bytes(header[0x30..0x38].try_into().unwrap());
+        //let sh_entsize = u64::from_le_bytes(header[0x38..0x40].try_into().unwrap());
 
-       // check for unsupported features
-       if sh_type == 0x4 || sh_type == 0x5 || sh_type == 0x6 || sh_type == 0x9 || 
-          sh_type == 0xb || sh_type == 0xe || sh_type == 0xf || sh_type == 0x10 || sh_type == 0x11 {
-           return Err(format!("{filename} contains unsupported section type {:#x}", sh_type));
-       }
+        // check for unsupported features
+        if sh_type == 0x4
+            || sh_type == 0x5
+            || sh_type == 0x6
+            || sh_type == 0x9
+            || sh_type == 0xb
+            || sh_type == 0xe
+            || sh_type == 0xf
+            || sh_type == 0x10
+            || sh_type == 0x11
+        {
+            return Err(format!(
+                "{filename} contains unsupported section type {:#x}",
+                sh_type
+            ));
+        }
 
-       if (sh_type == 1 || sh_type == 8) && (sh_flags & 0x2) != 0 {
-           // in-memory section; see if we have loadable data
-           let mut init = Vec::new();
-           for &(p_vaddr, ref seg_raw) in &chunks {
-               if p_vaddr <= sh_addr && sh_addr < p_vaddr + seg_raw.len() as i64 {
-                   let start_idx = (sh_addr - p_vaddr) as usize;
-                   let end_idx = start_idx + sh_size;
-                   init = seg_raw[start_idx..end_idx].to_vec();
-               }
-           }
-           segments.push(Segment::new(
-               sh_addr,
-               sh_addr + sh_size as i64,
-               (sh_flags & 0x1) != 0,
-               (sh_flags & 0x4) != 0,
-               init,
-           ));
-       } else if sh_strs.get(&sh_name) == Some(&String::from(".strtab")) && sh_type == 3 {
-           if sh_offset + sh_size > raw.len() {
-               return Err(format!("{filename} string table out of range"));
-           }
-           strs_raw = raw[sh_offset..sh_offset + sh_size].to_vec();
-       } else if sh_strs.get(&sh_name) == Some(&String::from(".symtab")) && sh_type == 2 {
-           if sh_offset + sh_size > raw.len() {
-               return Err(format!("{filename} symbol table out of range"));
-           }
-           syms_raw = raw[sh_offset..sh_offset + sh_size].to_vec();
-       }
+        if (sh_type == 1 || sh_type == 8) && (sh_flags & 0x2) != 0 {
+            // in-memory section; see if we have loadable data
+            let mut init = Vec::new();
+            for &(p_vaddr, ref seg_raw) in &chunks {
+                if p_vaddr <= sh_addr && sh_addr < p_vaddr + seg_raw.len() as i64 {
+                    let start_idx = (sh_addr - p_vaddr) as usize;
+                    let end_idx = start_idx + sh_size;
+                    init = seg_raw[start_idx..end_idx].to_vec();
+                }
+            }
+            segments.push(Segment::new(
+                sh_addr,
+                sh_addr + sh_size as i64,
+                (sh_flags & 0x1) != 0,
+                (sh_flags & 0x4) != 0,
+                init,
+            ));
+        } else if sh_strs.get(&sh_name) == Some(&String::from(".strtab")) && sh_type == 3 {
+            if sh_offset + sh_size > raw.len() {
+                return Err(format!("{filename} string table out of range"));
+            }
+            strs_raw = raw[sh_offset..sh_offset + sh_size].to_vec();
+        } else if sh_strs.get(&sh_name) == Some(&String::from(".symtab")) && sh_type == 2 {
+            if sh_offset + sh_size > raw.len() {
+                return Err(format!("{filename} symbol table out of range"));
+            }
+            syms_raw = raw[sh_offset..sh_offset + sh_size].to_vec();
+        }
     }
- 
+
     // make sure we found the string and symbol sections
     if strs_raw.is_empty() {
         return Err(format!("{filename}: no string table found"));
@@ -755,46 +836,46 @@ if raw[0..4] != *b"\x7fELF" {
     const SYMBOL_SIZE: usize = 24;
 
     for start in (0..syms_raw.len()).step_by(SYMBOL_SIZE) {
-       if start + SYMBOL_SIZE > syms_raw.len() {
-           return Err(format!("{filename} symbol table entry out of range"));
-       }
-       let symbol = &syms_raw[start..start+SYMBOL_SIZE];
-       let st_name = u32::from_le_bytes(symbol[0x00..0x04].try_into().unwrap()) as usize;
-       let st_info = symbol[0x04];
-       //let st_other = symbol[0x05];
-       let st_shndx = u16::from_le_bytes(symbol[0x06..0x08].try_into().unwrap());
-       let st_value = i64::from_le_bytes(symbol[0x08..0x10].try_into().unwrap());
-       //let st_size = u64::from_le_bytes(symbol[0x10..0x18].try_into().unwrap());
+        if start + SYMBOL_SIZE > syms_raw.len() {
+            return Err(format!("{filename} symbol table entry out of range"));
+        }
+        let symbol = &syms_raw[start..start + SYMBOL_SIZE];
+        let st_name = u32::from_le_bytes(symbol[0x00..0x04].try_into().unwrap()) as usize;
+        let st_info = symbol[0x04];
+        //let st_other = symbol[0x05];
+        let st_shndx = u16::from_le_bytes(symbol[0x06..0x08].try_into().unwrap());
+        let st_value = i64::from_le_bytes(symbol[0x08..0x10].try_into().unwrap());
+        //let st_size = u64::from_le_bytes(symbol[0x10..0x18].try_into().unwrap());
 
-       // find the name
-       let mut end = st_name;
-       while end < strs_raw.len() && strs_raw[end] != 0 {
-           end += 1;
-       }
-       if end >= strs_raw.len() {
-           return Err(format!("{filename} symbol name out of range"));
-       }
-       let name = String::from_utf8_lossy(&strs_raw[st_name..end]).to_string();
-       
-       if name.is_empty() || st_info == 4 {
-           // skip section entries and object file names
-           continue;
-       } else if name == "__global_pointer$" {
-           // keep global pointer
-           global_pointer = st_value;
-           address_symbols.insert(st_value, name);
-           continue;
-       } else if name.starts_with('$') || name.starts_with("__") {
-           // skip internal names
-           continue;
-       }
-       
-       // sort into text, data/bss, and other symbols
-       if st_shndx > 0 {
-           address_symbols.insert(st_value, name);
-       } else {
-           other_symbols.insert(name, st_value);
-       }
+        // find the name
+        let mut end = st_name;
+        while end < strs_raw.len() && strs_raw[end] != 0 {
+            end += 1;
+        }
+        if end >= strs_raw.len() {
+            return Err(format!("{filename} symbol name out of range"));
+        }
+        let name = String::from_utf8_lossy(&strs_raw[st_name..end]).to_string();
+
+        if name.is_empty() || st_info == 4 {
+            // skip section entries and object file names
+            continue;
+        } else if name == "__global_pointer$" {
+            // keep global pointer
+            global_pointer = st_value;
+            address_symbols.insert(st_value, name);
+            continue;
+        } else if name.starts_with('$') || name.starts_with("__") {
+            // skip internal names
+            continue;
+        }
+
+        // sort into text, data/bss, and other symbols
+        if st_shndx > 0 {
+            address_symbols.insert(st_value, name);
+        } else {
+            other_symbols.insert(name, st_value);
+        }
     }
 
     // allocate address space
@@ -803,58 +884,59 @@ if raw[0..4] != *b"\x7fELF" {
         e_entry,
         global_pointer,
         address_symbols,
-        other_symbols))
+        other_symbols,
+    ))
 }
 
 fn get_funct3(inst: i32) -> i32 {
-   (inst >> 12) & 0x07
+    (inst >> 12) & 0x07
 }
 
 fn get_rd(inst: i32) -> usize {
-   ((inst >> 7) & 0x1f) as usize
+    ((inst >> 7) & 0x1f) as usize
 }
 
 fn get_rs1(inst: i32) -> usize {
-   ((inst >> 15) & 0x1f) as usize
+    ((inst >> 15) & 0x1f) as usize
 }
 
 fn get_rs2(inst: i32) -> usize {
-   ((inst >> 20) & 0x1f) as usize
+    ((inst >> 20) & 0x1f) as usize
 }
 
 fn get_imm_i(inst: i32) -> i64 {
-   (inst >> 20) as i64
+    (inst >> 20) as i64
 }
 
 fn get_imm_s(inst: i32) -> i64 {
-   let mut imm = (inst >> 20) & !0x0000001f;
-   imm |= (inst >> 7) & 0x0000001f;
-   imm as i64
+    let mut imm = (inst >> 20) & !0x0000001f;
+    imm |= (inst >> 7) & 0x0000001f;
+    imm as i64
 }
 
 fn get_imm_b(inst: i32) -> i64 {
-   let mut imm = (inst >> 20) & !0x00000fff;
-   imm |= (inst << 4) & 0x00000800;
-   imm |= (inst >> 20) & 0x000007e0;
-   imm |= (inst >> 7) & 0x0000001e;
-   imm as i64
+    let mut imm = (inst >> 20) & !0x00000fff;
+    imm |= (inst << 4) & 0x00000800;
+    imm |= (inst >> 20) & 0x000007e0;
+    imm |= (inst >> 7) & 0x0000001e;
+    imm as i64
 }
 
 fn get_imm_u(inst: i32) -> i64 {
-   (inst & !0x00000fff) as i64
+    (inst & !0x00000fff) as i64
 }
 
 fn get_imm_j(inst: i32) -> i64 {
-   let mut imm = (inst >> 11) & !0x000fffff;
-   imm |= inst & 0x000ff000;
-   imm |= (inst >> 9) & 0x00000800;
-   imm |= (inst >> 20) & 0x000007e0;
-   imm |= (inst >> 20) & 0x0000001e;
-   imm as i64
+    let mut imm = (inst >> 11) & !0x000fffff;
+    imm |= inst & 0x000ff000;
+    imm |= (inst >> 9) & 0x00000800;
+    imm |= (inst >> 20) & 0x000007e0;
+    imm |= (inst >> 20) & 0x0000001e;
+    imm as i64
 }
 
 fn get_funct7(inst: i32) -> i32 {
-   inst >> 25
+    inst >> 25
 }
 
 fn i64_to_u64(n: i64) -> u64 {
@@ -862,10 +944,9 @@ fn i64_to_u64(n: i64) -> u64 {
 }
 
 const R: [&str; 32] = [
-    "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2",
-    "s0", "s1", "a0", "a1", "a2", "a3", "a4", "a5",
-    "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7",
-    "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6",
+    "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4",
+    "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4",
+    "t5", "t6",
 ];
 
 const RA: usize = 1;
@@ -887,41 +968,110 @@ fn decode(labels: &Machine, address: i64, inst: i32) -> Result<Instruction, Stri
         0x17 => Ok(decode_auipc(address, inst, get_rd(inst), get_imm_u(inst))),
 
         // jal
-        0x6f => Ok(decode_jal(labels, address, inst, get_rd(inst), get_imm_j(inst))),
+        0x6f => Ok(decode_jal(
+            labels,
+            address,
+            inst,
+            get_rd(inst),
+            get_imm_j(inst),
+        )),
 
         // jalr
-        0x67 => decode_jalr(address, inst, get_funct3(inst), get_rd(inst), get_rs1(inst), get_imm_i(inst)),
+        0x67 => decode_jalr(
+            address,
+            inst,
+            get_funct3(inst),
+            get_rd(inst),
+            get_rs1(inst),
+            get_imm_i(inst),
+        ),
 
         // beq, bne, blt, bge, bltu, bgeu
-        0x63 => decode_branches(labels, address, inst, get_funct3(inst), get_rs1(inst), get_rs2(inst), get_imm_b(inst)),
+        0x63 => decode_branches(
+            labels,
+            address,
+            inst,
+            get_funct3(inst),
+            get_rs1(inst),
+            get_rs2(inst),
+            get_imm_b(inst),
+        ),
 
         // lb, lh, lw, ld, lbu, lhu, lwu
-        0x03 => decode_load(address, inst, get_funct3(inst), get_rd(inst), get_rs1(inst), get_imm_i(inst)),
+        0x03 => decode_load(
+            address,
+            inst,
+            get_funct3(inst),
+            get_rd(inst),
+            get_rs1(inst),
+            get_imm_i(inst),
+        ),
 
         // sb, sh, sw, sd
-        0x23 => decode_store(address, inst, get_funct3(inst), get_rs1(inst), get_rs2(inst), get_imm_s(inst)),
+        0x23 => decode_store(
+            address,
+            inst,
+            get_funct3(inst),
+            get_rs1(inst),
+            get_rs2(inst),
+            get_imm_s(inst),
+        ),
 
         // addi, slti, sltiu, xori, ori, andi, slli, srli, srai
-        0x13 => decode_alu_imm(labels, address, inst, get_funct3(inst), get_rd(inst), get_rs1(inst), get_imm_i(inst)),
+        0x13 => decode_alu_imm(
+            labels,
+            address,
+            inst,
+            get_funct3(inst),
+            get_rd(inst),
+            get_rs1(inst),
+            get_imm_i(inst),
+        ),
 
         // addiw, slliw, srliw, sraiw
-        0x1b => decode_alu_imm_w(address, inst, get_funct3(inst), get_rd(inst), get_rs1(inst), get_imm_i(inst)),
+        0x1b => decode_alu_imm_w(
+            address,
+            inst,
+            get_funct3(inst),
+            get_rd(inst),
+            get_rs1(inst),
+            get_imm_i(inst),
+        ),
 
         // add, sub, sll, slt, sltu, xor, srl, sra, or, and
         // mul, mulh, mulhsu, mulhu, div, divu, rem, remu
-        0x33 => decode_alu(address, inst, get_funct3(inst), get_rd(inst), get_rs1(inst), get_rs2(inst), get_funct7(inst)),
+        0x33 => decode_alu(
+            address,
+            inst,
+            get_funct3(inst),
+            get_rd(inst),
+            get_rs1(inst),
+            get_rs2(inst),
+            get_funct7(inst),
+        ),
 
         // addw, subw, sllw, srlw, sraw
         // mulw, divw, remw, remuw
-        0x3b => decode_alu_w(address, inst, get_funct3(inst), get_rd(inst), get_rs1(inst), get_rs2(inst), get_funct7(inst)),
+        0x3b => decode_alu_w(
+            address,
+            inst,
+            get_funct3(inst),
+            get_rd(inst),
+            get_rs1(inst),
+            get_rs2(inst),
+            get_funct7(inst),
+        ),
 
         // fence
         0x0f => {
-            let execute: ExecuteFn = Box::new(move |_m: &mut Machine| {
-                Ok(())
-            });
+            let execute: ExecuteFn = Box::new(move |_m: &mut Machine| Ok(()));
 
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("fence"), Field::Fence], execute))
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![Field::Opcode("fence"), Field::Fence],
+                execute,
+            ))
         }
 
         // ecall, ebreak
@@ -936,9 +1086,17 @@ fn decode(labels: &Machine, address: i64, inst: i32) -> Result<Instruction, Stri
                     Ok(())
                 });
 
-                Ok(Instruction::new(address, inst, vec![Field::Opcode("ebreak")], execute))
+                Ok(Instruction::new(
+                    address,
+                    inst,
+                    vec![Field::Opcode("ebreak")],
+                    execute,
+                ))
             } else {
-                Err(format!("disassembler found unknown instruction {:#x}", inst))
+                Err(format!(
+                    "disassembler found unknown instruction {:#x}",
+                    inst
+                ))
             }
         }
         _ => Err(format!("disassembler found unknown opcode {:#x}", opcode)),
@@ -950,7 +1108,12 @@ fn decode_lui(address: i64, inst: i32, rd: usize, imm: i64) -> Instruction {
         m.set(rd, imm);
         Ok(())
     });
-    Instruction::new(address, inst, vec![Field::Opcode("lui"), Field::Reg(rd), Field::Imm(imm)], execute)
+    Instruction::new(
+        address,
+        inst,
+        vec![Field::Opcode("lui"), Field::Reg(rd), Field::Imm(imm)],
+        execute,
+    )
 }
 
 fn decode_auipc(address: i64, inst: i32, rd: usize, imm: i64) -> Instruction {
@@ -958,7 +1121,12 @@ fn decode_auipc(address: i64, inst: i32, rd: usize, imm: i64) -> Instruction {
         m.set(rd, m.pc + imm);
         Ok(())
     });
-    Instruction::new(address, inst, vec![Field::Opcode("auipc"), Field::Reg(rd), Field::Imm(imm)], execute)
+    Instruction::new(
+        address,
+        inst,
+        vec![Field::Opcode("auipc"), Field::Reg(rd), Field::Imm(imm)],
+        execute,
+    )
 }
 
 fn decode_jal(labels: &Machine, address: i64, inst: i32, rd: usize, imm: i64) -> Instruction {
@@ -966,8 +1134,8 @@ fn decode_jal(labels: &Machine, address: i64, inst: i32, rd: usize, imm: i64) ->
         m.set(rd, m.pc + 4);
         m.set_pc(m.pc + imm)
     });
-    
-    let dest = Field::Addr(labels.address_label(address + imm), address+imm);
+
+    let dest = Field::Addr(labels.address_label(address + imm), address + imm);
     let fields = if R[rd] == "zero" {
         vec![Field::Opcode("j"), dest]
     } else if R[rd] == "ra" {
@@ -975,14 +1143,21 @@ fn decode_jal(labels: &Machine, address: i64, inst: i32, rd: usize, imm: i64) ->
     } else {
         vec![Field::Opcode("jal"), Field::Reg(rd), dest]
     };
-    
+
     let mut inst = Instruction::new(address, inst, fields, execute);
     inst.static_target = Some(address + imm);
     inst.return_target = if rd == 0 { None } else { Some(address + 4) };
     inst
 }
 
-fn decode_jalr(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, imm: i64) -> Result<Instruction, String> {
+fn decode_jalr(
+    address: i64,
+    inst: i32,
+    funct3: i32,
+    rd: usize,
+    rs1: usize,
+    imm: i64,
+) -> Result<Instruction, String> {
     if funct3 != 0 {
         return Err(format!("jalr with unknown funct3 value of {}", funct3));
     }
@@ -998,7 +1173,11 @@ fn decode_jalr(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, imm:
         ("zero", 0, "ra") => vec![Field::Opcode("ret")],
         ("zero", 0, _) => vec![Field::Opcode("jr"), Field::Reg(rs1)],
         ("ra", 0, _) => vec![Field::Opcode("jalr"), Field::Reg(rs1)],
-        _ => vec![Field::Opcode("jalr"), Field::Reg(rd), Field::Indirect(imm, rs1)],
+        _ => vec![
+            Field::Opcode("jalr"),
+            Field::Reg(rd),
+            Field::Indirect(imm, rs1),
+        ],
     };
 
     let mut inst = Instruction::new(address, inst, fields, execute);
@@ -1008,10 +1187,16 @@ fn decode_jalr(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, imm:
     Ok(inst)
 }
 
-fn decode_branches(labels: &Machine, address: i64, inst: i32, funct3: i32, rs1: usize, rs2: usize, imm: i64)
-    -> Result<Instruction, String> {
-
-    let dest = Field::Addr(labels.address_label(address + imm), address+imm);
+fn decode_branches(
+    labels: &Machine,
+    address: i64,
+    inst: i32,
+    funct3: i32,
+    rs1: usize,
+    rs2: usize,
+    imm: i64,
+) -> Result<Instruction, String> {
+    let dest = Field::Addr(labels.address_label(address + imm), address + imm);
 
     let (execute, fields) = match funct3 {
         0 => {
@@ -1028,10 +1213,15 @@ fn decode_branches(labels: &Machine, address: i64, inst: i32, funct3: i32, rs1: 
             } else if R[rs2] == "zero" {
                 vec![Field::Opcode("beqz"), Field::Reg(rs1), dest.clone()]
             } else {
-                vec![Field::Opcode("beq"), Field::Reg(rs1), Field::Reg(rs2), dest.clone()]
+                vec![
+                    Field::Opcode("beq"),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                    dest.clone(),
+                ]
             };
             (execute, fields)
-        },
+        }
 
         1 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
@@ -1047,10 +1237,15 @@ fn decode_branches(labels: &Machine, address: i64, inst: i32, funct3: i32, rs1: 
             } else if R[rs2] == "zero" {
                 vec![Field::Opcode("bnez"), Field::Reg(rs1), dest.clone()]
             } else {
-                vec![Field::Opcode("bne"), Field::Reg(rs1), Field::Reg(rs2), dest.clone()]
+                vec![
+                    Field::Opcode("bne"),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                    dest.clone(),
+                ]
             };
             (execute, fields)
-        },
+        }
 
         4 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
@@ -1066,10 +1261,15 @@ fn decode_branches(labels: &Machine, address: i64, inst: i32, funct3: i32, rs1: 
             } else if R[rs2] == "zero" {
                 vec![Field::Opcode("bltz"), Field::Reg(rs1), dest.clone()]
             } else {
-                vec![Field::Opcode("blt"), Field::Reg(rs1), Field::Reg(rs2), dest.clone()]
+                vec![
+                    Field::Opcode("blt"),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                    dest.clone(),
+                ]
             };
             (execute, fields)
-        },
+        }
 
         5 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
@@ -1085,38 +1285,53 @@ fn decode_branches(labels: &Machine, address: i64, inst: i32, funct3: i32, rs1: 
             } else if R[rs2] == "zero" {
                 vec![Field::Opcode("bgez"), Field::Reg(rs1), dest.clone()]
             } else {
-                vec![Field::Opcode("bge"), Field::Reg(rs1), Field::Reg(rs2), dest.clone()]
+                vec![
+                    Field::Opcode("bge"),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                    dest.clone(),
+                ]
             };
             (execute, fields)
-        },
+        }
 
         6 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 if i64_to_u64(m.get(rs1)) < i64_to_u64(m.get(rs2)) {
                     m.set_pc(m.pc + imm)
-                } else{
+                } else {
                     Ok(())
                 }
             });
 
-            let fields = vec![Field::Opcode("bltu"), Field::Reg(rs1), Field::Reg(rs2), dest.clone()];
+            let fields = vec![
+                Field::Opcode("bltu"),
+                Field::Reg(rs1),
+                Field::Reg(rs2),
+                dest.clone(),
+            ];
             (execute, fields)
-        },
+        }
 
         7 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 if i64_to_u64(m.get(rs1)) >= i64_to_u64(m.get(rs2)) {
                     m.set_pc(m.pc + imm)
-                } else{
+                } else {
                     Ok(())
                 }
             });
 
-            let fields = vec![Field::Opcode("bgeu"), Field::Reg(rs1), Field::Reg(rs2), dest.clone()];
+            let fields = vec![
+                Field::Opcode("bgeu"),
+                Field::Reg(rs1),
+                Field::Reg(rs2),
+                dest.clone(),
+            ];
             (execute, fields)
-        },
+        }
 
-        _ => return Err(format!("branch of unknown type {}", funct3))
+        _ => return Err(format!("branch of unknown type {}", funct3)),
     };
 
     let mut inst = Instruction::new(address, inst, fields, execute);
@@ -1124,7 +1339,14 @@ fn decode_branches(labels: &Machine, address: i64, inst: i32, funct3: i32, rs1: 
     Ok(inst)
 }
 
-fn decode_load(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, imm: i64) -> Result<Instruction, String> {
+fn decode_load(
+    address: i64,
+    inst: i32,
+    funct3: i32,
+    rd: usize,
+    rs1: usize,
+    imm: i64,
+) -> Result<Instruction, String> {
     let (execute, fields) = match funct3 {
         0 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
@@ -1133,11 +1355,15 @@ fn decode_load(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, imm:
                 m.set(rd, val);
                 Ok(())
             });
-            
-            let fields = vec![Field::Opcode("lb"), Field::Reg(rd), Field::Indirect(imm, rs1)];
+
+            let fields = vec![
+                Field::Opcode("lb"),
+                Field::Reg(rd),
+                Field::Indirect(imm, rs1),
+            ];
             (execute, fields)
-        },
-        
+        }
+
         1 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let effective_address = m.get(rs1) + imm;
@@ -1145,11 +1371,15 @@ fn decode_load(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, imm:
                 m.set(rd, val);
                 Ok(())
             });
-            
-            let fields = vec![Field::Opcode("lh"), Field::Reg(rd), Field::Indirect(imm, rs1)];
+
+            let fields = vec![
+                Field::Opcode("lh"),
+                Field::Reg(rd),
+                Field::Indirect(imm, rs1),
+            ];
             (execute, fields)
-        },
-        
+        }
+
         2 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let effective_address = m.get(rs1) + imm;
@@ -1157,11 +1387,15 @@ fn decode_load(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, imm:
                 m.set(rd, val);
                 Ok(())
             });
-            
-            let fields = vec![Field::Opcode("lw"), Field::Reg(rd), Field::Indirect(imm, rs1)];
+
+            let fields = vec![
+                Field::Opcode("lw"),
+                Field::Reg(rd),
+                Field::Indirect(imm, rs1),
+            ];
             (execute, fields)
-        },
-        
+        }
+
         3 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let effective_address = m.get(rs1) + imm;
@@ -1169,11 +1403,15 @@ fn decode_load(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, imm:
                 m.set(rd, val);
                 Ok(())
             });
-            
-            let fields = vec![Field::Opcode("ld"), Field::Reg(rd), Field::Indirect(imm, rs1)];
+
+            let fields = vec![
+                Field::Opcode("ld"),
+                Field::Reg(rd),
+                Field::Indirect(imm, rs1),
+            ];
             (execute, fields)
-        },
-        
+        }
+
         4 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let effective_address = m.get(rs1) + imm;
@@ -1181,11 +1419,15 @@ fn decode_load(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, imm:
                 m.set(rd, val);
                 Ok(())
             });
-            
-            let fields = vec![Field::Opcode("lbu"), Field::Reg(rd), Field::Indirect(imm, rs1)];
+
+            let fields = vec![
+                Field::Opcode("lbu"),
+                Field::Reg(rd),
+                Field::Indirect(imm, rs1),
+            ];
             (execute, fields)
-        },
-        
+        }
+
         5 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let effective_address = m.get(rs1) + imm;
@@ -1193,11 +1435,15 @@ fn decode_load(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, imm:
                 m.set(rd, val);
                 Ok(())
             });
-            
-            let fields = vec![Field::Opcode("lhu"), Field::Reg(rd), Field::Indirect(imm, rs1)];
+
+            let fields = vec![
+                Field::Opcode("lhu"),
+                Field::Reg(rd),
+                Field::Indirect(imm, rs1),
+            ];
             (execute, fields)
-        },
-        
+        }
+
         6 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let effective_address = m.get(rs1) + imm;
@@ -1205,18 +1451,29 @@ fn decode_load(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, imm:
                 m.set(rd, val);
                 Ok(())
             });
-            
-            let fields = vec![Field::Opcode("lwu"), Field::Reg(rd), Field::Indirect(imm, rs1) ];
+
+            let fields = vec![
+                Field::Opcode("lwu"),
+                Field::Reg(rd),
+                Field::Indirect(imm, rs1),
+            ];
             (execute, fields)
-        },
-        
-        _ => return Err(format!("load instruction of unknown type {}", funct3))
+        }
+
+        _ => return Err(format!("load instruction of unknown type {}", funct3)),
     };
-    
+
     Ok(Instruction::new(address, inst, fields, execute))
 }
 
-fn decode_store(address: i64, inst: i32, funct3: i32, rs1: usize, rs2: usize, imm: i64) -> Result<Instruction, String> {
+fn decode_store(
+    address: i64,
+    inst: i32,
+    funct3: i32,
+    rs1: usize,
+    rs2: usize,
+    imm: i64,
+) -> Result<Instruction, String> {
     let (execute, fields) = match funct3 {
         0 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
@@ -1224,10 +1481,14 @@ fn decode_store(address: i64, inst: i32, funct3: i32, rs1: usize, rs2: usize, im
                 let raw = ((m.get(rs2) & 0xff) as u8).to_le_bytes();
                 m.store(effective_address, &raw)
             });
-            
-            let fields = vec![Field::Opcode("sb"), Field::Reg(rs2), Field::Indirect(imm, rs1)];
+
+            let fields = vec![
+                Field::Opcode("sb"),
+                Field::Reg(rs2),
+                Field::Indirect(imm, rs1),
+            ];
             (execute, fields)
-        },
+        }
 
         1 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
@@ -1235,10 +1496,14 @@ fn decode_store(address: i64, inst: i32, funct3: i32, rs1: usize, rs2: usize, im
                 let raw = ((m.get(rs2) & 0xffff) as u16).to_le_bytes();
                 m.store(effective_address, &raw)
             });
-            
-            let fields = vec![Field::Opcode("sh"), Field::Reg(rs2), Field::Indirect(imm, rs1)];
+
+            let fields = vec![
+                Field::Opcode("sh"),
+                Field::Reg(rs2),
+                Field::Indirect(imm, rs1),
+            ];
             (execute, fields)
-        },
+        }
 
         2 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
@@ -1246,10 +1511,14 @@ fn decode_store(address: i64, inst: i32, funct3: i32, rs1: usize, rs2: usize, im
                 let raw = ((m.get(rs2) & 0xffffffff) as u32).to_le_bytes();
                 m.store(effective_address, &raw)
             });
-            
-            let fields = vec![Field::Opcode("sw"), Field::Reg(rs2), Field::Indirect(imm, rs1)];
+
+            let fields = vec![
+                Field::Opcode("sw"),
+                Field::Reg(rs2),
+                Field::Indirect(imm, rs1),
+            ];
             (execute, fields)
-        },
+        }
 
         3 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
@@ -1257,21 +1526,33 @@ fn decode_store(address: i64, inst: i32, funct3: i32, rs1: usize, rs2: usize, im
                 let raw = m.get(rs2).to_le_bytes();
                 m.store(effective_address, &raw)
             });
-            
-            let fields = vec![Field::Opcode("sd"), Field::Reg(rs2), Field::Indirect(imm, rs1)];
-            (execute, fields)
-        },
 
-        _ => return Err(format!("store instruction of unknown type {}", funct3))
+            let fields = vec![
+                Field::Opcode("sd"),
+                Field::Reg(rs2),
+                Field::Indirect(imm, rs1),
+            ];
+            (execute, fields)
+        }
+
+        _ => return Err(format!("store instruction of unknown type {}", funct3)),
     };
 
     Ok(Instruction::new(address, inst, fields, execute))
 }
 
-fn decode_alu_imm(labels: &Machine, address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, imm: i64) -> Result<Instruction, String> {
+fn decode_alu_imm(
+    labels: &Machine,
+    address: i64,
+    inst: i32,
+    funct3: i32,
+    rd: usize,
+    rs1: usize,
+    imm: i64,
+) -> Result<Instruction, String> {
     let shamt = imm & 0x3f;
     let imm_high = imm >> 6;
-    
+
     match funct3 {
         0 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
@@ -1279,116 +1560,216 @@ fn decode_alu_imm(labels: &Machine, address: i64, inst: i32, funct3: i32, rd: us
                 m.set(rd, val);
                 Ok(())
             });
-            
+
             let fields = match (R[rd], R[rs1], imm) {
                 ("zero", "zero", 0) => vec![Field::Opcode("nop")],
                 (_, "zero", _) => vec![Field::Opcode("li"), Field::Reg(rd), Field::Imm(imm)],
                 (_, _, 0) => vec![Field::Opcode("mv"), Field::Reg(rd), Field::Reg(rs1)],
-                (rd_str, "gp", _) if rd_str != "gp" => vec![Field::Opcode("la"), Field::Reg(rd), Field::Addr(labels.address_label(labels.global_pointer + imm), labels.global_pointer + imm)],
-                _ => vec![Field::Opcode("addi"), Field::Reg(rd), Field::Reg(rs1), Field::Imm(imm)]
+                (rd_str, "gp", _) if rd_str != "gp" => vec![
+                    Field::Opcode("la"),
+                    Field::Reg(rd),
+                    Field::Addr(
+                        labels.address_label(labels.global_pointer + imm),
+                        labels.global_pointer + imm,
+                    ),
+                ],
+                _ => vec![
+                    Field::Opcode("addi"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Imm(imm),
+                ],
             };
             Ok(Instruction::new(address, inst, fields, execute))
-        },
-        
+        }
+
         2 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let val = if m.get(rs1) < imm { 1 } else { 0 };
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("slti"), Field::Reg(rd), Field::Reg(rs1), Field::Imm(imm)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("slti"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Imm(imm),
+                ],
+                execute,
+            ))
+        }
+
         3 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
-                let val = if i64_to_u64(m.get(rs1)) < i64_to_u64(imm) { 1 } else { 0 };
+                let val = if i64_to_u64(m.get(rs1)) < i64_to_u64(imm) {
+                    1
+                } else {
+                    0
+                };
                 m.set(rd, val);
                 Ok(())
             });
-            
+
             let fields = if imm == 1 {
                 vec![Field::Opcode("seqz"), Field::Reg(rd), Field::Reg(rs1)]
             } else {
-                vec![Field::Opcode("sltiu"), Field::Reg(rd), Field::Reg(rs1), Field::Imm(imm)]
+                vec![
+                    Field::Opcode("sltiu"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Imm(imm),
+                ]
             };
             Ok(Instruction::new(address, inst, fields, execute))
-        },
-        
+        }
+
         4 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let val = m.get(rs1) ^ imm;
                 m.set(rd, val);
                 Ok(())
             });
-            
+
             let fields = if imm == -1 {
                 vec![Field::Opcode("not"), Field::Reg(rd), Field::Reg(rs1)]
             } else {
-                vec![Field::Opcode("xori"), Field::Reg(rd), Field::Reg(rs1), Field::Imm(imm)]
+                vec![
+                    Field::Opcode("xori"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Imm(imm),
+                ]
             };
             Ok(Instruction::new(address, inst, fields, execute))
-        },
-        
+        }
+
         6 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let val = m.get(rs1) | imm;
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("ori"), Field::Reg(rd), Field::Reg(rs1), Field::Imm(imm)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("ori"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Imm(imm),
+                ],
+                execute,
+            ))
+        }
+
         7 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let val = m.get(rs1) & imm;
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("andi"), Field::Reg(rd), Field::Reg(rs1), Field::Imm(imm)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("andi"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Imm(imm),
+                ],
+                execute,
+            ))
+        }
+
         1 => {
             if imm_high != 0x00 {
-                return Err(format!("immediate mode alu instruction of type {} with unknown subtype {}", funct3, imm_high));
+                return Err(format!(
+                    "immediate mode alu instruction of type {} with unknown subtype {}",
+                    funct3, imm_high
+                ));
             }
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let val = m.get(rs1) << shamt;
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("slli"), Field::Reg(rd), Field::Reg(rs1), Field::Imm(shamt)], execute))
-        },
-        
-        5 => {
-            match imm_high {
-                0x00 => {
-                    let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
-                        let val = (i64_to_u64(m.get(rs1)) >> shamt) as i64;
-                        m.set(rd, val);
-                        Ok(())
-                    });
-                    Ok(Instruction::new(address, inst, vec![Field::Opcode("srli"), Field::Reg(rd), Field::Reg(rs1), Field::Imm(shamt)], execute))
-                },
-                0x10 => {
-                    let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
-                        let val = m.get(rs1) >> shamt;
-                        m.set(rd, val);
-                        Ok(())
-                    });
-                    Ok(Instruction::new(address, inst, vec![Field::Opcode("srai"), Field::Reg(rd), Field::Reg(rs1), Field::Imm(shamt)], execute))
-                },
-                _ => Err(format!("immediate mode alu instruction of type {} with unknown subtype {}", funct3, imm_high))
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("slli"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Imm(shamt),
+                ],
+                execute,
+            ))
+        }
+
+        5 => match imm_high {
+            0x00 => {
+                let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
+                    let val = (i64_to_u64(m.get(rs1)) >> shamt) as i64;
+                    m.set(rd, val);
+                    Ok(())
+                });
+                Ok(Instruction::new(
+                    address,
+                    inst,
+                    vec![
+                        Field::Opcode("srli"),
+                        Field::Reg(rd),
+                        Field::Reg(rs1),
+                        Field::Imm(shamt),
+                    ],
+                    execute,
+                ))
             }
+            0x10 => {
+                let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
+                    let val = m.get(rs1) >> shamt;
+                    m.set(rd, val);
+                    Ok(())
+                });
+                Ok(Instruction::new(
+                    address,
+                    inst,
+                    vec![
+                        Field::Opcode("srai"),
+                        Field::Reg(rd),
+                        Field::Reg(rs1),
+                        Field::Imm(shamt),
+                    ],
+                    execute,
+                ))
+            }
+            _ => Err(format!(
+                "immediate mode alu instruction of type {} with unknown subtype {}",
+                funct3, imm_high
+            )),
         },
-        
-        _ => Err(format!("immediate mode alu instruction of unknown type {}", funct3))
+
+        _ => Err(format!(
+            "immediate mode alu instruction of unknown type {}",
+            funct3
+        )),
     }
 }
 
-fn decode_alu_imm_w(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, imm: i64) -> Result<Instruction, String> {
+fn decode_alu_imm_w(
+    address: i64,
+    inst: i32,
+    funct3: i32,
+    rd: usize,
+    rs1: usize,
+    imm: i64,
+) -> Result<Instruction, String> {
     let shamt = imm & 0x1f;
     let imm_high = imm >> 5;
-    
+
     match funct3 {
         0 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
@@ -1396,56 +1777,106 @@ fn decode_alu_imm_w(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize,
                 m.set32(rd, val);
                 Ok(())
             });
-            
+
             let fields = match (R[rd], R[rs1], imm) {
                 ("zero", "zero", 0) => vec![Field::Opcode("nop")],
                 (_, "zero", _) => vec![Field::Opcode("li"), Field::Reg(rd), Field::Imm(imm)],
-                _ => vec![Field::Opcode("addiw"), Field::Reg(rd), Field::Reg(rs1), Field::Imm(imm)]
+                _ => vec![
+                    Field::Opcode("addiw"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Imm(imm),
+                ],
             };
             Ok(Instruction::new(address, inst, fields, execute))
-        },
-        
+        }
+
         1 => {
             if imm_high != 0x00 {
-                return Err(format!("immediate mode alu w instruction of type {} with unknown subtype {}", funct3, imm_high));
+                return Err(format!(
+                    "immediate mode alu w instruction of type {} with unknown subtype {}",
+                    funct3, imm_high
+                ));
             }
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let val = m.get(rs1) << shamt;
                 m.set32(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("slliw"), Field::Reg(rd), Field::Reg(rs1), Field::Imm(shamt)], execute))
-        },
-        
-        5 => {
-            match imm_high {
-                0x00 => {
-                    let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
-                        let val = (m.get(rs1) & 0xffffffff) >> shamt;
-                        m.set32(rd, val);
-                        Ok(())
-                    });
-                    Ok(Instruction::new(address, inst, vec![Field::Opcode("srliw"), Field::Reg(rd), Field::Reg(rs1), Field::Imm(shamt)], execute))
-                },
-                0x20 => {
-                    let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
-                        let val = (m.get(rs1) as i32) as i64 >> shamt;
-                        m.set32(rd, val);
-                        Ok(())
-                    });
-                    Ok(Instruction::new(address, inst, vec![Field::Opcode("sraiw"), Field::Reg(rd), Field::Reg(rs1), Field::Imm(shamt)], execute))
-                },
-                _ => Err(format!("immediate mode alu w instruction of type {} with unknown subtype {}", funct3, imm_high))
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("slliw"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Imm(shamt),
+                ],
+                execute,
+            ))
+        }
+
+        5 => match imm_high {
+            0x00 => {
+                let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
+                    let val = (m.get(rs1) & 0xffffffff) >> shamt;
+                    m.set32(rd, val);
+                    Ok(())
+                });
+                Ok(Instruction::new(
+                    address,
+                    inst,
+                    vec![
+                        Field::Opcode("srliw"),
+                        Field::Reg(rd),
+                        Field::Reg(rs1),
+                        Field::Imm(shamt),
+                    ],
+                    execute,
+                ))
             }
+            0x20 => {
+                let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
+                    let val = (m.get(rs1) as i32) as i64 >> shamt;
+                    m.set32(rd, val);
+                    Ok(())
+                });
+                Ok(Instruction::new(
+                    address,
+                    inst,
+                    vec![
+                        Field::Opcode("sraiw"),
+                        Field::Reg(rd),
+                        Field::Reg(rs1),
+                        Field::Imm(shamt),
+                    ],
+                    execute,
+                ))
+            }
+            _ => Err(format!(
+                "immediate mode alu w instruction of type {} with unknown subtype {}",
+                funct3, imm_high
+            )),
         },
-        
-        _ => Err(format!("immediate mode alu w instruction of unknown type {}", funct3))
+
+        _ => Err(format!(
+            "immediate mode alu w instruction of unknown type {}",
+            funct3
+        )),
     }
 }
 
-fn decode_alu(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2: usize, funct7: i32) -> Result<Instruction, String> {
+fn decode_alu(
+    address: i64,
+    inst: i32,
+    funct3: i32,
+    rd: usize,
+    rs1: usize,
+    rs2: usize,
+    funct7: i32,
+) -> Result<Instruction, String> {
     let combined = (funct7 << 8) | funct3;
-    
+
     match combined {
         0x0000 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
@@ -1453,9 +1884,19 @@ fn decode_alu(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2: 
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("add"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("add"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x2000 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let val = m.get(rs1).wrapping_sub(m.get(rs2));
@@ -1465,11 +1906,16 @@ fn decode_alu(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2: 
             let fields = if R[rs1] == "zero" {
                 vec![Field::Opcode("neg"), Field::Reg(rd), Field::Reg(rs2)]
             } else {
-                vec![Field::Opcode("sub"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)]
+                vec![
+                    Field::Opcode("sub"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ]
             };
             Ok(Instruction::new(address, inst, fields, execute))
-        },
-        
+        }
+
         0x0001 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let rs2_val = m.get(rs2) & 0x3f;
@@ -1477,9 +1923,19 @@ fn decode_alu(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2: 
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("sll"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("sll"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0002 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let val = if m.get(rs1) < m.get(rs2) { 1 } else { 0 };
@@ -1491,34 +1947,58 @@ fn decode_alu(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2: 
             } else if R[rs1] == "zero" {
                 vec![Field::Opcode("sgtz"), Field::Reg(rd), Field::Reg(rs2)]
             } else {
-                vec![Field::Opcode("slt"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)]
+                vec![
+                    Field::Opcode("slt"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ]
             };
             Ok(Instruction::new(address, inst, fields, execute))
-        },
-        
+        }
+
         0x0003 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
-                let val = if i64_to_u64(m.get(rs1)) < i64_to_u64(m.get(rs2)) { 1 } else { 0 };
+                let val = if i64_to_u64(m.get(rs1)) < i64_to_u64(m.get(rs2)) {
+                    1
+                } else {
+                    0
+                };
                 m.set(rd, val);
                 Ok(())
             });
             let fields = if R[rs1] == "zero" {
                 vec![Field::Opcode("snez"), Field::Reg(rd), Field::Reg(rs2)]
             } else {
-                vec![Field::Opcode("sltu"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)]
+                vec![
+                    Field::Opcode("sltu"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ]
             };
             Ok(Instruction::new(address, inst, fields, execute))
-        },
-        
+        }
+
         0x0004 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let val = m.get(rs1) ^ m.get(rs2);
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("xor"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("xor"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0005 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let rs2_val = m.get(rs2) & 0x3f;
@@ -1526,9 +2006,19 @@ fn decode_alu(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2: 
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("srl"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("srl"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x2005 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let rs2_val = m.get(rs2) & 0x3f;
@@ -1536,63 +2026,134 @@ fn decode_alu(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2: 
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("sra"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("sra"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0006 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let val = m.get(rs1) | m.get(rs2);
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("or"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("or"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0007 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let val = m.get(rs1) & m.get(rs2);
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("and"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("and"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0100 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let val = m.get(rs1).wrapping_mul(m.get(rs2));
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("mul"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("mul"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0101 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let val = ((m.get(rs1) as i128 * m.get(rs2) as i128) >> 64) as i64;
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("mulh"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("mulh"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0102 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let val = ((m.get(rs1) as i128 * i64_to_u64(m.get(rs2)) as i128) >> 64) as i64;
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("mulhsu"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("mulhsu"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0103 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
-                let val = ((i64_to_u64(m.get(rs1)) as u128 * i64_to_u64(m.get(rs2)) as u128) >> 64) as i64;
+                let val = ((i64_to_u64(m.get(rs1)) as u128 * i64_to_u64(m.get(rs2)) as u128) >> 64)
+                    as i64;
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("mulhu"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("mulhu"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0104 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let rs2_val = m.get(rs2);
@@ -1604,9 +2165,19 @@ fn decode_alu(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2: 
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("div"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("div"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0105 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let rs2_val = i64_to_u64(m.get(rs2));
@@ -1618,9 +2189,19 @@ fn decode_alu(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2: 
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("divu"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("divu"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0106 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let rs2_val = m.get(rs2);
@@ -1632,9 +2213,19 @@ fn decode_alu(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2: 
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("rem"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("rem"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0107 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let rs2_val = i64_to_u64(m.get(rs2));
@@ -1646,16 +2237,37 @@ fn decode_alu(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2: 
                 m.set(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("remu"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
-        _ => Err(format!("alu instruction of unknown type {} subtype {}", funct3, funct7))
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("remu"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
+        _ => Err(format!(
+            "alu instruction of unknown type {} subtype {}",
+            funct3, funct7
+        )),
     }
 }
 
-fn decode_alu_w(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2: usize, funct7: i32) -> Result<Instruction, String> {
+fn decode_alu_w(
+    address: i64,
+    inst: i32,
+    funct3: i32,
+    rd: usize,
+    rs1: usize,
+    rs2: usize,
+    funct7: i32,
+) -> Result<Instruction, String> {
     let combined = (funct7 << 8) | funct3;
-    
+
     match combined {
         0x0000 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
@@ -1663,18 +2275,38 @@ fn decode_alu_w(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2
                 m.set32(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("addw"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("addw"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x2000 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let val = m.get(rs1).wrapping_sub(m.get(rs2));
                 m.set32(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("subw"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("subw"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0001 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let rs2_val = m.get(rs2) & 0x1f;
@@ -1682,9 +2314,19 @@ fn decode_alu_w(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2
                 m.set32(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("sllw"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("sllw"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0005 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let rs2_val = m.get(rs2) & 0x1f;
@@ -1692,9 +2334,19 @@ fn decode_alu_w(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2
                 m.set32(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("srlw"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("srlw"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x2005 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let rs2_val = m.get(rs2) & 0x1f;
@@ -1702,18 +2354,38 @@ fn decode_alu_w(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2
                 m.set32(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("sraw"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("sraw"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0100 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let val = m.get(rs1).wrapping_mul(m.get(rs2));
                 m.set32(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("mulw"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("mulw"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0104 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let rs2_val = m.get(rs2);
@@ -1725,9 +2397,19 @@ fn decode_alu_w(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2
                 m.set32(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("divw"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("divw"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0105 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let rs2_val = i64_to_u64(m.get(rs2));
@@ -1739,9 +2421,19 @@ fn decode_alu_w(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2
                 m.set32(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("divuw"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("divuw"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0106 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let rs2_val = m.get(rs2);
@@ -1753,9 +2445,19 @@ fn decode_alu_w(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2
                 m.set32(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("remw"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("remw"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
         0x0107 => {
             let execute: ExecuteFn = Box::new(move |m: &mut Machine| {
                 let rs2_val = i64_to_u64(m.get(rs2));
@@ -1767,10 +2469,23 @@ fn decode_alu_w(address: i64, inst: i32, funct3: i32, rd: usize, rs1: usize, rs2
                 m.set32(rd, val);
                 Ok(())
             });
-            Ok(Instruction::new(address, inst, vec![Field::Opcode("remuw"), Field::Reg(rd), Field::Reg(rs1), Field::Reg(rs2)], execute))
-        },
-        
-        _ => Err(format!("alu w instruction of unknown type {} subtype {}", funct3, funct7))
+            Ok(Instruction::new(
+                address,
+                inst,
+                vec![
+                    Field::Opcode("remuw"),
+                    Field::Reg(rd),
+                    Field::Reg(rs1),
+                    Field::Reg(rs2),
+                ],
+                execute,
+            ))
+        }
+
+        _ => Err(format!(
+            "alu w instruction of unknown type {} subtype {}",
+            funct3, funct7
+        )),
     }
 }
 
@@ -1779,14 +2494,20 @@ fn decode_ecall(address: i64, inst: i32) -> Instruction {
         match m.get(17) {
             63 => {
                 // read system call
-                m.effects.as_mut().unwrap().other_message =
-                    Some(format!("read({}, {:#x}, {})", m.get(10), m.get(11), m.get(12)));
+                m.effects.as_mut().unwrap().other_message = Some(format!(
+                    "read({}, {:#x}, {})",
+                    m.get(10),
+                    m.get(11),
+                    m.get(12)
+                ));
                 let fd = m.get(10);
                 let buf_addr = m.get(11);
                 let count = m.get(12);
-                
+
                 if fd != 0 {
-                    return Err(format!("read syscall: only stdin (fd 0) supported, not {fd}"));
+                    return Err(format!(
+                        "read syscall: only stdin (fd 0) supported, not {fd}"
+                    ));
                 }
                 if count < 0 {
                     return Err(format!("read syscall: invalid buffer size: {count}"));
@@ -1805,18 +2526,24 @@ fn decode_ecall(address: i64, inst: i32) -> Instruction {
                 m.stdin.extend_from_slice(&read_buffer);
                 m.effects.as_mut().unwrap().stdin = Some(read_buffer);
                 Ok(())
-            },
+            }
 
             64 => {
                 // write system call
-                m.effects.as_mut().unwrap().other_message =
-                    Some(format!("write({}, {:#x}, {})", m.get(10), m.get(11), m.get(12)));
+                m.effects.as_mut().unwrap().other_message = Some(format!(
+                    "write({}, {:#x}, {})",
+                    m.get(10),
+                    m.get(11),
+                    m.get(12)
+                ));
                 let fd = m.get(10);
                 let buf_addr = m.get(11);
                 let count = m.get(12);
 
                 if fd != 1 {
-                    return Err(format!("write syscall: only stdout (fd 1) supported, not {fd}"));
+                    return Err(format!(
+                        "write syscall: only stdout (fd 1) supported, not {fd}"
+                    ));
                 }
                 if count < 0 {
                     return Err(format!("write syscall: invalid buffer size: {count}"));
@@ -1827,7 +2554,7 @@ fn decode_ecall(address: i64, inst: i32) -> Instruction {
                 m.stdout.extend_from_slice(&write_buffer);
                 m.effects.as_mut().unwrap().stdout = Some(write_buffer);
                 Ok(())
-            },
+            }
 
             93 => {
                 // exit system call
@@ -1835,9 +2562,9 @@ fn decode_ecall(address: i64, inst: i32) -> Instruction {
                 let effects = m.effects.as_mut().unwrap();
                 effects.error(format!("exit({})", status));
                 Ok(())
-            },
+            }
 
-            syscall => Err(format!("unsupported syscall {syscall}"))
+            syscall => Err(format!("unsupported syscall {syscall}")),
         }
     });
 
@@ -1858,7 +2585,10 @@ fn merge_instruction_pairs(m: &Machine, instructions: &mut Vec<Instruction>) -> 
 
         if fields1.len() == 3 && fields2.len() == 4 {
             match (fields1.as_slice(), fields2.as_slice()) {
-                ([Field::Opcode("auipc"), Field::Reg(rd1), Field::Imm(imm1)], [Field::Opcode("addi"), Field::Reg(rd2), Field::Reg(rs2), Field::Imm(imm2)]) if rd1 == rd2 && rd2 == rs2 => {
+                (
+                    [Field::Opcode("auipc"), Field::Reg(rd1), Field::Imm(imm1)],
+                    [Field::Opcode("addi"), Field::Reg(rd2), Field::Reg(rs2), Field::Imm(imm2)],
+                ) if rd1 == rd2 && rd2 == rs2 => {
                     let addr = instruction1.address + imm1 + imm2;
                     let sym = Field::Addr(m.address_label(addr), addr);
                     let rd = *rd1;
@@ -1872,7 +2602,12 @@ fn merge_instruction_pairs(m: &Machine, instructions: &mut Vec<Instruction>) -> 
                     };
 
                     let length = instruction1.length + instruction2.length;
-                    let mut new_instruction = Instruction::new(instruction1.address, -1, vec![Field::Opcode("la"), Field::Reg(rd), sym], execute);
+                    let mut new_instruction = Instruction::new(
+                        instruction1.address,
+                        -1,
+                        vec![Field::Opcode("la"), Field::Reg(rd), sym],
+                        execute,
+                    );
                     new_instruction.length = length;
 
                     instructions.remove(i);
@@ -1880,7 +2615,10 @@ fn merge_instruction_pairs(m: &Machine, instructions: &mut Vec<Instruction>) -> 
                     instructions.insert(i, new_instruction);
                 }
 
-                ([Field::Opcode("auipc"), Field::Reg(rd1), Field::Imm(imm1)], [Field::Opcode("jalr"), Field::Reg(rd2), Field::Indirect(imm2, rs2)]) if rd1 == rd2 && rd1 == rs2 && *rd1 == RA => {
+                (
+                    [Field::Opcode("auipc"), Field::Reg(rd1), Field::Imm(imm1)],
+                    [Field::Opcode("jalr"), Field::Reg(rd2), Field::Indirect(imm2, rs2)],
+                ) if rd1 == rd2 && rd1 == rs2 && *rd1 == RA => {
                     let addr = instruction1.address + imm1 + imm2;
                     let sym = Field::Addr(m.address_label(addr), addr);
                     let rd = *rd1;
@@ -1894,7 +2632,12 @@ fn merge_instruction_pairs(m: &Machine, instructions: &mut Vec<Instruction>) -> 
                     };
 
                     let length = instruction1.length + instruction2.length;
-                    let mut new_instruction = Instruction::new(instruction1.address, -1, vec![Field::Opcode("call"), sym], execute);
+                    let mut new_instruction = Instruction::new(
+                        instruction1.address,
+                        -1,
+                        vec![Field::Opcode("call"), sym],
+                        execute,
+                    );
                     new_instruction.length = length;
 
                     instructions.remove(i);
@@ -1910,94 +2653,111 @@ fn merge_instruction_pairs(m: &Machine, instructions: &mut Vec<Instruction>) -> 
     Ok(())
 }
 
-fn add_labels(m: &Machine, instructions: &mut [Instruction], addresses: &HashMap<i64,usize>) -> Result<(), String> {
-   // add labels from symbol table and note branch targets
-   for i in 0..instructions.len() {
-       let addr = instructions[i].address;
-       if m.address_symbols.contains_key(&addr) {
-           instructions[i].label = Some(m.address_symbols[&addr].clone());
-       }
-       if let Some(target) = instructions[i].static_target {
-           let Some(&target_i) = addresses.get(&target) else {
-               return Err(format!("branch from {:#x} to unknown target address {:#x}", addr, target));
-           };
-           instructions[target_i].is_target = true;
-       }
-   }
+fn add_labels(
+    m: &Machine,
+    instructions: &mut [Instruction],
+    addresses: &HashMap<i64, usize>,
+) -> Result<(), String> {
+    // add labels from symbol table and note branch targets
+    for i in 0..instructions.len() {
+        let addr = instructions[i].address;
+        if m.address_symbols.contains_key(&addr) {
+            instructions[i].label = Some(m.address_symbols[&addr].clone());
+        }
+        if let Some(target) = instructions[i].static_target {
+            let Some(&target_i) = addresses.get(&target) else {
+                return Err(format!(
+                    "branch from {:#x} to unknown target address {:#x}",
+                    addr, target
+                ));
+            };
+            instructions[target_i].is_target = true;
+        }
+    }
 
-   // add numbered local labels
-   let mut next_label = 1;
-   let mut next_fn = HashMap::new();
-   let mut prev = None;
+    // add numbered local labels
+    let mut next_label = 1;
+    let mut next_fn = HashMap::new();
+    let mut prev = None;
 
-   for instruction in instructions.iter_mut() {
-       if instruction.label.is_none() && instruction.is_target {
-           instruction.label = Some(next_label.to_string());
-           next_label += 1;
-       } else if instruction.label.is_some() {
-           next_label = 1;
-           if let Some(prev) = prev {
-               next_fn.insert(prev, instruction.address);
-           }
-           prev = Some(instruction.address);
-       }
-   }
-   if let Some(prev) = prev {
-       next_fn.insert(prev, m.text_end);
-   }
+    for instruction in instructions.iter_mut() {
+        if instruction.label.is_none() && instruction.is_target {
+            instruction.label = Some(next_label.to_string());
+            next_label += 1;
+        } else if instruction.label.is_some() {
+            next_label = 1;
+            if let Some(prev) = prev {
+                next_fn.insert(prev, instruction.address);
+            }
+            prev = Some(instruction.address);
+        }
+    }
+    if let Some(prev) = prev {
+        next_fn.insert(prev, m.text_end);
+    }
 
-   // update branches to reference local labels
-   let mut fn_start = 0;
-   let mut fn_end = 0;
+    // update branches to reference local labels
+    let mut fn_start = 0;
+    let mut fn_end = 0;
 
-   for i in 0..instructions.len() {
-       if let Some(ref label) = instructions[i].label {
-           if !is_digit(label) {
-               fn_start = instructions[i].address;
-               fn_end = next_fn[&fn_start];
-           }
-       }
+    for i in 0..instructions.len() {
+        if let Some(ref label) = instructions[i].label {
+            if !is_digit(label) {
+                fn_start = instructions[i].address;
+                fn_end = next_fn[&fn_start];
+            }
+        }
 
-       let Some(&addr) = (match instructions[i].fields.as_slice() {
-           [Field::Opcode("j"), Field::Addr(None, dest)] => Some(dest),
-           [Field::Opcode("beqz"), _, Field::Addr(None, dest)] => Some(dest),
-           [Field::Opcode("beq"), _, _, Field::Addr(None, dest)] => Some(dest),
-           [Field::Opcode("bnez"), _, Field::Addr(None, dest)] => Some(dest),
-           [Field::Opcode("bne"), _, _, Field::Addr(None, dest)] => Some(dest),
-           [Field::Opcode("bgtz"), _, Field::Addr(None, dest)] => Some(dest),
-           [Field::Opcode("bltz"), _, Field::Addr(None, dest)] => Some(dest),
-           [Field::Opcode("blt"), _, _, Field::Addr(None, dest)] => Some(dest),
-           [Field::Opcode("blez"), _, Field::Addr(None, dest)] => Some(dest),
-           [Field::Opcode("bgez"), _, Field::Addr(None, dest)] => Some(dest),
-           [Field::Opcode("bge"), _, _, Field::Addr(None, dest)] => Some(dest),
-           [Field::Opcode("bltu"), _, _, Field::Addr(None, dest)] => Some(dest),
-           [Field::Opcode("bgeu"), _, _, Field::Addr(None, dest)] => Some(dest),
-           _ => None,
-       }) else {
-           continue;
-       };
+        let Some(&addr) = (match instructions[i].fields.as_slice() {
+            [Field::Opcode("j"), Field::Addr(None, dest)] => Some(dest),
+            [Field::Opcode("beqz"), _, Field::Addr(None, dest)] => Some(dest),
+            [Field::Opcode("beq"), _, _, Field::Addr(None, dest)] => Some(dest),
+            [Field::Opcode("bnez"), _, Field::Addr(None, dest)] => Some(dest),
+            [Field::Opcode("bne"), _, _, Field::Addr(None, dest)] => Some(dest),
+            [Field::Opcode("bgtz"), _, Field::Addr(None, dest)] => Some(dest),
+            [Field::Opcode("bltz"), _, Field::Addr(None, dest)] => Some(dest),
+            [Field::Opcode("blt"), _, _, Field::Addr(None, dest)] => Some(dest),
+            [Field::Opcode("blez"), _, Field::Addr(None, dest)] => Some(dest),
+            [Field::Opcode("bgez"), _, Field::Addr(None, dest)] => Some(dest),
+            [Field::Opcode("bge"), _, _, Field::Addr(None, dest)] => Some(dest),
+            [Field::Opcode("bltu"), _, _, Field::Addr(None, dest)] => Some(dest),
+            [Field::Opcode("bgeu"), _, _, Field::Addr(None, dest)] => Some(dest),
+            _ => None,
+        }) else {
+            continue;
+        };
 
-       // ignore branches outside the current function
-       if addr < fn_start || addr >= fn_end {
-           continue;
-       }
+        // ignore branches outside the current function
+        if addr < fn_start || addr >= fn_end {
+            continue;
+        }
 
-       let Some(&target_i) = addresses.get(&addr) else {
-           return Err(format!("branch from {:#x} found to unknown address {:#x}", instructions[i].address, addr));
-       };
-       if let Some(ref target_label) = instructions[target_i].label {
-           if is_digit(target_label) {
-               let label: usize = target_label.parse().unwrap();
-               let is_forward = addr > instructions[i].address;
-               let last = instructions[i].fields.len() - 1;
-               instructions[i].fields[last] = Field::LocalBranchTarget (label, is_forward, addr);
-           }
-       }
-   }
-   Ok(())
+        let Some(&target_i) = addresses.get(&addr) else {
+            return Err(format!(
+                "branch from {:#x} found to unknown address {:#x}",
+                instructions[i].address, addr
+            ));
+        };
+        if let Some(ref target_label) = instructions[target_i].label {
+            if is_digit(target_label) {
+                let label: usize = target_label.parse().unwrap();
+                let is_forward = addr > instructions[i].address;
+                let last = instructions[i].fields.len() - 1;
+                instructions[i].fields[last] = Field::LocalBranchTarget(label, is_forward, addr);
+            }
+        }
+    }
+    Ok(())
 }
 
-fn trace(m: &mut Machine, instructions: &[Rc<Instruction>], addresses: &HashMap<i64,usize>, lint: bool, max_steps: usize, mode: &str) -> Vec<Effects> {
+fn trace(
+    m: &mut Machine,
+    instructions: &[Rc<Instruction>],
+    addresses: &HashMap<i64, usize>,
+    lint: bool,
+    max_steps: usize,
+    mode: &str,
+) -> Vec<Effects> {
     let mut linter = Linter::new(m.x[2]);
     let mut sequence: Vec<Effects> = Vec::new();
     let mut i = 0;
@@ -2100,7 +2860,7 @@ impl Linter {
         let mut at_entry = [None; 32];
         for (n, elt) in at_entry.iter_mut().enumerate() {
             *elt = Some(n);
-        };
+        }
         let mut valid = [false; 32];
         valid[0] = true;
         valid[2] = true;
@@ -2122,7 +2882,12 @@ impl Linter {
         self.next_n - 1
     }
 
-    fn check_instruction(&mut self, m: &Machine, instruction: &Rc<Instruction>, effects: &mut Effects) -> Result<(), String> {
+    fn check_instruction(
+        &mut self,
+        m: &Machine,
+        instruction: &Rc<Instruction>,
+        effects: &mut Effects,
+    ) -> Result<(), String> {
         // start with checks applicable to all instructions
         // this allows us to make basic assumptions later
 
@@ -2158,13 +2923,19 @@ impl Linter {
             Field::Opcode("call" | "jal" | "jalr") => {
                 // must use ra for return address
                 let Some((_, RegisterValue { register: 1, .. })) = effects.reg_write else {
-                    return Err(format!("{} did not use ra for return address", instruction.fields[0].to_string(false)));
+                    return Err(format!(
+                        "{} did not use ra for return address",
+                        instruction.fields[0].to_string(false)
+                    ));
                 };
 
                 // must call named function
                 let (_, target_pc) = effects.pc;
                 if !m.address_symbols.contains_key(&target_pc) {
-                    return Err(format!("{} to unlabeled address", instruction.fields[0].to_string(false)));
+                    return Err(format!(
+                        "{} to unlabeled address",
+                        instruction.fields[0].to_string(false)
+                    ));
                 }
                 let name = &m.address_symbols[&target_pc];
 
@@ -2221,20 +2992,26 @@ impl Linter {
 
                 // record the registers at function entry time
                 self.at_entry = self.registers;
-            },
+            }
 
             Field::Opcode("ret") => {
                 // ra, gp, and tp must match what they were at call time
                 for x in [1, 3, 4] {
                     if self.registers[x] != self.at_entry[x] {
-                        return Err(format!("{} is not same value as when function called", R[x]));
+                        return Err(format!(
+                            "{} is not same value as when function called",
+                            R[x]
+                        ));
                     }
                 }
 
                 // s registers must be same as at call time
                 for &x in &S_REGS {
                     if self.registers[x] != self.at_entry[x] {
-                        return Err(format!("{} is not same value as when function called", R[x]));
+                        return Err(format!(
+                            "{} is not same value as when function called",
+                            R[x]
+                        ));
                     }
                 }
 
@@ -2247,7 +3024,12 @@ impl Linter {
                 effects.function_end = Some(m.x[2]);
 
                 // pop previous function context
-                if let Some(FunctionRegisters { at_entry, valid, at_entry_sp }) = self.stack.pop() {
+                if let Some(FunctionRegisters {
+                    at_entry,
+                    valid,
+                    at_entry_sp,
+                }) = self.stack.pop()
+                {
                     self.at_entry = at_entry;
                     self.valid = valid;
                     self.at_entry_sp = at_entry_sp;
@@ -2264,7 +3046,7 @@ impl Linter {
                     self.registers[x] = None;
                     self.valid[x] = false;
                 }
-            },
+            }
 
             Field::Opcode("sb" | "sh" | "sw" | "sd") => {
                 let Some((_, write)) = &effects.mem_write else {
@@ -2285,7 +3067,7 @@ impl Linter {
                     Field::Opcode("sh") => (1, self.new_n()),
                     Field::Opcode("sw") => (3, self.new_n()),
                     Field::Opcode("sd") => (7, self.registers[rs2].unwrap()),
-                    _ => unreachable!()
+                    _ => unreachable!(),
                 };
 
                 if addr & alignment != 0 {
@@ -2293,13 +3075,10 @@ impl Linter {
                 }
 
                 // record the memory write
-                for address in addr..addr+size as i64 {
-                    self.memory.insert(address, ValueInMemory {
-                        n,
-                        size,
-                    });
+                for address in addr..addr + size as i64 {
+                    self.memory.insert(address, ValueInMemory { n, size });
                 }
-            },
+            }
 
             Field::Opcode("lb" | "lh" | "lw" | "ld" | "lbu" | "lhu" | "lwu") => {
                 let Some(read) = &effects.mem_read else {
@@ -2320,7 +3099,7 @@ impl Linter {
                     Field::Opcode("lh" | "lhu") => 1,
                     Field::Opcode("lw" | "lwu") => 3,
                     Field::Opcode("ld") => 7,
-                    _ => unreachable!()
+                    _ => unreachable!(),
                 };
                 if addr & alignment != 0 {
                     return Err("unaligned read from memory".to_string());
@@ -2332,15 +3111,25 @@ impl Linter {
                 let n = if let Some(mem_val) = self.memory.get(&addr) {
                     let n = mem_val.n;
 
-                    for address in addr..addr+size as i64 {
+                    for address in addr..addr + size as i64 {
                         match self.memory.get(&address) {
-                            None => return Err("reading data that was only partially written".to_string()),
-                            Some(ValueInMemory { n: mem_n, size: mem_size }) => {
+                            None => {
+                                return Err(
+                                    "reading data that was only partially written".to_string()
+                                )
+                            }
+                            Some(ValueInMemory {
+                                n: mem_n,
+                                size: mem_size,
+                            }) => {
                                 if *mem_n != n {
                                     return Err("reading data from multiple writes".to_string());
                                 }
                                 if *mem_size != size {
-                                    return Err("reading data with different size than when written".to_string());
+                                    return Err(
+                                        "reading data with different size than when written"
+                                            .to_string(),
+                                    );
                                 }
                             }
                         }
@@ -2350,18 +3139,20 @@ impl Linter {
                     // record this value in memory as we verify that no bytes
                     // already have a value number
                     let n = self.new_n();
-                    for address in addr..addr+size as i64 {
+                    for address in addr..addr + size as i64 {
                         if self.memory.contains_key(&address) {
-                            return Err("reading data that is only partially from a previous write".to_string());
+                            return Err(
+                                "reading data that is only partially from a previous write"
+                                    .to_string(),
+                            );
                         }
                         self.memory.insert(address, ValueInMemory { n, size });
                     }
                     n
-
                 };
 
                 self.registers[rd] = Some(n);
-            },
+            }
 
             Field::Opcode("ecall") => {
                 // write syscall
@@ -2370,7 +3161,7 @@ impl Linter {
                     let size = read.value.len();
 
                     // only allow byte values from memory
-                    for address in addr..addr+size as i64 {
+                    for address in addr..addr + size as i64 {
                         if let Some(val) = self.memory.get(&address) {
                             if val.size != 1 {
                                 return Err("write syscall on non-byte data".to_string());
@@ -2384,7 +3175,7 @@ impl Linter {
                     let addr = write.address;
                     let size = write.value.len();
 
-                    for address in addr..addr+size as i64 {
+                    for address in addr..addr + size as i64 {
                         // do not allow overwrite of non-byte data
                         if let Some(val) = self.memory.get(&address) {
                             if val.size != 1 {
@@ -2397,7 +3188,7 @@ impl Linter {
                         self.memory.insert(address, ValueInMemory { n, size: 1 });
                     }
                 }
-            },
+            }
 
             _ => {}
         }
@@ -2426,8 +3217,8 @@ fn main() -> Result<(), String> {
                 if i < args.len() {
                     mode = args[i].clone();
                     if !["run", "trace", "dasm", "debug"].contains(&mode.as_str()) {
-                         eprintln!("invalid mode");
-                         usage = true;
+                        eprintln!("invalid mode");
+                        usage = true;
                     }
                 } else {
                     eprintln!("missing argument for mode");
@@ -2466,7 +3257,9 @@ fn main() -> Result<(), String> {
         eprintln!();
         eprintln!("Options:");
         eprintln!("  -e, --executable <path>            Path of executable to run (default a.out)");
-        eprintln!("  -l, --list <true|false>            Apply strict ABI and other checks (default true)");
+        eprintln!(
+            "  -l, --list <true|false>            Apply strict ABI and other checks (default true)"
+        );
         eprintln!("  -m, --mode <run|trace|dasm|debug>  Simulator Mode (default run)");
         eprintln!("  -h, --help                         Show this help");
         std::process::exit(1);
@@ -2498,14 +3291,19 @@ fn main() -> Result<(), String> {
     }
 
     // convert to Rc<Instruction> so Effects can reference entries
-    let instructions: Vec<Rc<Instruction>> = instructions.into_iter()
-        .map(Rc::new)
-        .collect();
+    let instructions: Vec<Rc<Instruction>> = instructions.into_iter().map(Rc::new).collect();
 
     // trace the entire execution
     // for run mode, have pre_trace echo output as it goes
     // so inputs and outputs are correctly interleved
-    let sequence = trace(&mut m, &instructions, &addresses, lint == "true", 100000000, &mode);
+    let sequence = trace(
+        &mut m,
+        &instructions,
+        &addresses,
+        lint == "true",
+        100000000,
+        &mode,
+    );
 
     // debug
     if mode == "debug" {
@@ -2518,9 +3316,11 @@ fn main() -> Result<(), String> {
 
     // should have ended with exit(0)
     if let Some(effects) = sequence.last() {
-        if let (Field::Opcode("ecall"), Some(msg)) = (&effects.instruction.fields[0], &effects.other_message) {
+        if let (Field::Opcode("ecall"), Some(msg)) =
+            (&effects.instruction.fields[0], &effects.other_message)
+        {
             if msg.starts_with("exit(") && msg.ends_with(")") {
-                let n: i32 = msg[5..msg.len()-1].parse().unwrap();
+                let n: i32 = msg[5..msg.len() - 1].parse().unwrap();
                 std::process::exit(n);
             }
         }
