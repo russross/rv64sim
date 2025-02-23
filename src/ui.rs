@@ -38,6 +38,10 @@ pub struct Tui {
     pastels: Vec<Colors>,
 
     hex_mode: bool,
+    show_registers: bool,
+    show_output: bool,
+    show_stack: bool,
+    show_data: bool,
 }
 
 struct Pane {
@@ -355,6 +359,10 @@ impl Tui {
             pastels,
 
             hex_mode: false,
+            show_registers: true,
+            show_output: true,
+            show_stack: true,
+            show_data: true,
         })
     }
 
@@ -513,6 +521,22 @@ impl Tui {
                 self.hex_mode = !self.hex_mode;
             }
 
+            KeyCode::Char('r') => {
+                self.show_registers = !self.show_registers;
+            }
+
+            KeyCode::Char('o') => {
+                self.show_output = !self.show_output;
+            }
+
+            KeyCode::Char('s') => {
+                self.show_stack = !self.show_stack;
+            }
+
+            KeyCode::Char('d') => {
+                self.show_data = !self.show_data;
+            }
+
             // ignore other keys
             _ => {}
         }
@@ -538,12 +562,18 @@ impl Tui {
         ))?;
         let mut corners = Vec::new();
         let mut source = Pane::new(&mut out, self.normal_color, size_x, size_y, true)?;
-        let (stack, data) = if source.width >= 80 {
+        // an 80-column terminal gets source and memory views, narrower does not
+        let (stack, data) = if size_x >= 80
+            && (self.show_stack || self.show_data && self.machine.data_start > 0)
+        {
             let mut mem = source.split_right(&mut out, 39, false, &mut corners)?;
-            if source.height >= 20 && self.machine.data_start > 0 {
+            if mem.height >= 22 && self.show_stack && self.show_data && self.machine.data_start > 0
+            {
                 let data = mem.split_bottom(&mut out, mem.height * 2 / 3, false, &mut corners)?;
                 (Some(mem), Some(data))
-            } else if self.machine.most_recent_memory >= self.machine.stack_start {
+            } else if self.show_stack
+                && (self.machine.most_recent_memory >= self.machine.stack_start || !self.show_data)
+            {
                 (Some(mem), None)
             } else {
                 (None, Some(mem))
@@ -551,12 +581,50 @@ impl Tui {
         } else {
             (None, None)
         };
-        // 10 = 4 (registers) + 1 (line) + 4 (output) + 1 (line)
-        let (registers, output) = if source.height.saturating_sub(10) >= 3 {
-            let mut registers = source.split_bottom(&mut out, 9, true, &mut corners)?;
-            let output = registers.split_bottom(&mut out, 4, true, &mut corners)?;
+
+        let output_lines = if self.show_output && !self.machine.stdout.is_empty() {
+            // count the output lines (a single trailing newline is ignored)
+            self.machine
+                .stdout
+                .iter()
+                .rev()
+                .skip(1)
+                .fold(1, |a, &elt| if elt == b'\n' { a + 1 } else { a })
+        } else {
+            0
+        };
+
+        // a 24-line terminal gets source, registers, and output, shorter does not
+        let (registers, output) = if source.height >= 22
+            && self.show_registers
+            && self.show_output
+            && !self.machine.stdout.is_empty()
+        {
+            // output gets at least 4 lines and registers gets exactly 4
+            // they sit at their minimums up to a 24-line terminal, then
+            // additional lines are split 2/3 source and 1/3 output pane
+            // with the output getting the first new line
+            // so min source height is 12 before allowing other panes
+            let surplus = source.height.saturating_sub(12).saturating_sub(10);
+            let output_min = 4;
+            let natural_size = output_min + (surplus + 2) / 3;
+
+            // keep at least 4 lines but otherwise don't grow beyond the amount of output
+            let lines = output_lines.max(output_min).min(natural_size);
+            let mut registers = source.split_bottom(&mut out, 5 + lines, true, &mut corners)?;
+            let output = registers.split_bottom(&mut out, lines, true, &mut corners)?;
             (Some(registers), Some(output))
-        } else if source.height.saturating_sub(5) >= 3 {
+        } else if source.height >= 17 && !self.show_registers && output_lines > 0 {
+            let surplus = source.height.saturating_sub(12).saturating_sub(5);
+
+            // output claims any extra lines that would have gone to registers
+            let output_min = 4 + surplus.min(5);
+            let surplus = surplus.saturating_sub(5);
+            let natural_size = output_min + (surplus + 2) / 3;
+            let lines = output_lines.max(4).min(natural_size);
+            let output = source.split_bottom(&mut out, lines, true, &mut corners)?;
+            (None, Some(output))
+        } else if source.height >= 17 && self.show_registers {
             let registers = source.split_bottom(&mut out, 4, true, &mut corners)?;
             (Some(registers), None)
         } else {
