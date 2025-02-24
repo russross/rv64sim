@@ -42,11 +42,12 @@ pub struct Tui {
     show_output: bool,
     show_stack: bool,
     show_data: bool,
+    show_help: bool,
 }
 
 struct Pane {
-    left: u16,
     top: u16,
+    left: u16,
     width: u16,
     height: u16,
     cursor_x: u16,
@@ -61,30 +62,55 @@ impl Pane {
     fn new(
         out: &mut Vec<u8>,
         color: Colors,
-        x: u16,
-        y: u16,
+        origin_x: u16,
+        origin_y: u16,
+        outer_width: u16,
+        outer_height: u16,
         flow_down: bool,
     ) -> Result<Self, String> {
         let pane = Pane {
-            top: 1,
-            left: 1,
-            height: y - 2,
-            width: x - 2,
-            cursor_y: if flow_down { 0 } else { y - 3 },
+            left: origin_x + 1,
+            top: origin_y + 1,
+            width: outer_width - 2,
+            height: outer_height - 2,
+            cursor_y: if flow_down { 0 } else { outer_height - 3 },
             cursor_x: 0,
             flow_down,
             color,
             output_buffer: Vec::new(),
         };
 
-        serr!(queue!(out, MoveTo(0, 0), Print("┌")))?;
-        serr!(pane.hline(out, 1, 0, x - 2))?;
-        serr!(queue!(out, MoveTo(x - 1, 0), Print("┐")))?;
-        serr!(queue!(out, MoveTo(0, y - 1), Print("└")))?;
-        serr!(pane.hline(out, 1, y - 1, x - 2))?;
-        serr!(queue!(out, MoveTo(x - 1, y - 1), Print("┘")))?;
-        serr!(pane.vline(out, 0, 1, y - 2))?;
-        serr!(pane.vline(out, x - 1, 1, y - 2))?;
+        serr!(queue!(out, SetColors(color)))?;
+        serr!(queue!(out, MoveTo(origin_x, origin_y), Print("┌")))?;
+        serr!(pane.hline(out, origin_x + 1, origin_y, outer_width - 2))?;
+        serr!(queue!(
+            out,
+            MoveTo(origin_x + outer_width - 1, origin_y),
+            Print("┐")
+        ))?;
+        serr!(queue!(
+            out,
+            MoveTo(origin_x, origin_y + outer_height - 1),
+            Print("└")
+        ))?;
+        serr!(pane.hline(
+            out,
+            origin_x + 1,
+            origin_y + outer_height - 1,
+            outer_width - 2
+        ))?;
+        serr!(queue!(
+            out,
+            MoveTo(origin_x + outer_width - 1, origin_y + outer_height - 1),
+            Print("┘")
+        ))?;
+        serr!(pane.vline(out, origin_x, origin_y + 1, outer_height - 2))?;
+        serr!(pane.vline(
+            out,
+            origin_x + outer_width - 1,
+            origin_y + 1,
+            outer_height - 2
+        ))?;
         Ok(pane)
     }
 
@@ -363,6 +389,7 @@ impl Tui {
             show_output: true,
             show_stack: true,
             show_data: true,
+            show_help: false,
         })
     }
 
@@ -391,6 +418,10 @@ impl Tui {
 
     fn handle_key(&mut self, key_event: KeyEvent, source_height: u16) -> Result<(), String> {
         match key_event.code {
+            _ if self.show_help => {
+                self.show_help = false;
+            }
+
             // cursor motion
             KeyCode::Up => {
                 self.cursor_index = self.cursor_index.saturating_sub(1);
@@ -517,6 +548,10 @@ impl Tui {
                 }
             }
 
+            KeyCode::Char('?' | 'h') => {
+                self.show_help = true;
+            }
+
             KeyCode::Char('x') => {
                 self.hex_mode = !self.hex_mode;
             }
@@ -561,7 +596,7 @@ impl Tui {
             Clear(ClearType::All)
         ))?;
         let mut corners = Vec::new();
-        let mut source = Pane::new(&mut out, self.normal_color, size_x, size_y, true)?;
+        let mut source = Pane::new(&mut out, self.normal_color, 0, 0, size_x, size_y, true)?;
         // an 80-column terminal gets source and memory views, narrower does not
         let (stack, data) = if size_x >= 80
             && (self.show_stack || self.show_data && self.machine.data_start > 0)
@@ -641,10 +676,20 @@ impl Tui {
                 MoveTo(2, size_y - 1),
                 SetColors(self.normal_color),
                 Print(" "),
-                Print(status_line),
+                Print(&status_line),
                 Print(" ")
             ))?;
         }
+        let help_msg = " ? for help ";
+        if size_x >= status_line.len() as u16 + help_msg.len() as u16 + 8 {
+            serr!(queue!(
+                out,
+                MoveTo(size_x - 3 - help_msg.len() as u16, size_y - 1),
+                SetColors(self.normal_color),
+                Print(help_msg)
+            ))?;
+        }
+
         if let Some(mut registers) = registers {
             self.render_registers(&mut registers)?;
             out.append(&mut registers.output_buffer);
@@ -660,6 +705,25 @@ impl Tui {
         if let Some(mut output) = output {
             self.render_output(&mut output)?;
             out.append(&mut output.output_buffer);
+        }
+
+        if self.show_help {
+            let (help_x, help_y) = (63, 22);
+            let (left, width) = if size_x >= help_x + 2 {
+                let space = (size_x - (help_x + 2)) / 2;
+                (space, help_x + 2)
+            } else {
+                (0, size_x)
+            };
+            let (top, height) = if size_y >= help_y + 2 {
+                let space = (size_y - (help_y + 2)) / 2;
+                (space, help_y + 2)
+            } else {
+                (0, size_y)
+            };
+            let mut help = Pane::new(&mut out, self.normal_color, left, top, width, height, true)?;
+            self.render_help(&mut help)?;
+            out.append(&mut help.output_buffer);
         }
 
         let mut stdout = io::stdout();
@@ -943,6 +1007,103 @@ impl Tui {
         for line in get_last_n_lines(&self.machine.stdout, pane.height as usize) {
             serr!(writeln!(pane, "{}", line))?;
         }
+
+        Ok(())
+    }
+
+    fn render_help(&mut self, pane: &mut Pane) -> Result<(), String> {
+        pane.label("Help")?;
+
+        serr!((|| {
+            writeln!(
+                pane,
+                "                                                               "
+            )?;
+            writeln!(
+                pane,
+                " To move the cursor without stepping:                          "
+            )?;
+            writeln!(
+                pane,
+                "   ↑/up arrow       : move cursor up one instruction           "
+            )?;
+            writeln!(
+                pane,
+                "   ↓/down arrow     : move cursor down one instruction         "
+            )?;
+            writeln!(
+                pane,
+                "   PgUp/Fn-↑        : move cursor up one page                  "
+            )?;
+            writeln!(
+                pane,
+                "   PgDown/Fn-↓      : move cursor down one page                "
+            )?;
+            writeln!(
+                pane,
+                "                                                               "
+            )?;
+            writeln!(
+                pane,
+                " To step forward/rewind through program:                       "
+            )?;
+            writeln!(
+                pane,
+                "   →/right arrow    : step forward one instruction             "
+            )?;
+            writeln!(
+                pane,
+                "   ←/left arrow     : rewind one instruction                   "
+            )?;
+            writeln!(
+                pane,
+                "   end key/Fn-→     : fast forward to end of current function  "
+            )?;
+            writeln!(
+                pane,
+                "   home key/Fn-←    : rewind to start of current function      "
+            )?;
+            writeln!(
+                pane,
+                "   enter/return     : fast forward to instruction under cursor "
+            )?;
+            writeln!(
+                pane,
+                "   backspace/delete : rewind to instruction under cursor       "
+            )?;
+            writeln!(
+                pane,
+                "                                                               "
+            )?;
+            writeln!(
+                pane,
+                " Toggles:                                                      "
+            )?;
+            writeln!(
+                pane,
+                "   x                : switch between hexadecimal/decimal mode  "
+            )?;
+            writeln!(
+                pane,
+                "   r                : hide/show register window pane           "
+            )?;
+            writeln!(
+                pane,
+                "   o                : hide/show output window pane             "
+            )?;
+            writeln!(
+                pane,
+                "   s                : hide/show stack segment window pane      "
+            )?;
+            writeln!(
+                pane,
+                "   d                : hide/show data segment window pane       "
+            )?;
+            writeln!(
+                pane,
+                "                                                               "
+            )
+        })())?;
 
         Ok(())
     }
