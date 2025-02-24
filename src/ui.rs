@@ -33,7 +33,6 @@ pub struct Tui {
     inactive_stack_color: Colors,
     current_pc_color: Colors,
     cursor_color: Colors,
-    current_memory_color: Colors,
     data_colors: Vec<(i64, Colors)>,
     pastels: Vec<Colors>,
 
@@ -332,9 +331,6 @@ impl Tui {
         // cursor if != pc (black text on Grey53)
         let cursor_color = Colors::new(black, Color::AnsiValue(102));
 
-        // current memory address (white text on NavyBlue)
-        let current_memory_color = Colors::new(black, Color::AnsiValue(71));
-
         // memory chunks, with pastel foreground colors
         // the are all saturation 20%, lightness 60%, with various hues
         let pastels = vec![
@@ -380,7 +376,6 @@ impl Tui {
             inactive_stack_color,
             current_pc_color,
             cursor_color,
-            current_memory_color,
             data_colors,
             pastels,
 
@@ -937,7 +932,10 @@ impl Tui {
 
                 // does this need special highlighting as the most recent access?
                 if most_recent_start <= j && j < most_recent_end {
-                    next_color = self.current_memory_color;
+                    // invert the color parts
+                    let fg = next_color.foreground.unwrap();
+                    let bg = next_color.background.unwrap();
+                    next_color = Colors::new(bg, fg);
                 }
 
                 if let Ok(byte) = self.machine.load_u8(j) {
