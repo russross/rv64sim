@@ -2835,6 +2835,7 @@ fn trace(
 struct FunctionRegisters {
     at_entry: [Option<usize>; 32],
     valid: [bool; 32],
+    save_only: [bool; 32],
     at_entry_sp: i64,
 }
 
@@ -2852,6 +2853,7 @@ struct Linter {
 
     registers: [Option<usize>; 32],
     valid: [bool; 32],
+    save_only: [bool; 32],
     next_n: usize,
 }
 
@@ -2864,6 +2866,7 @@ impl Linter {
         let mut valid = [false; 32];
         valid[0] = true;
         valid[2] = true;
+        let save_only = [false; 32];
         let registers = at_entry;
 
         Self {
@@ -2873,6 +2876,7 @@ impl Linter {
             at_entry_sp,
             registers,
             valid,
+            save_only,
             next_n: 32,
         }
     }
@@ -2897,12 +2901,35 @@ impl Linter {
             if !self.valid[x] || self.registers[x].is_none() {
                 return Err(format!("{} is uninitialized", R[x]));
             }
+
+            // save-only values can be moved to other registers
+            // or written to memory but nothing else
+            if self.save_only[x] {
+                match &effects.mem_write {
+                    Some((
+                        _,
+                        MemoryValue {
+                            value: store_val, ..
+                        },
+                    )) if store_val.len() == 8 => {
+                        // 64-bit write to memory is okay
+                    }
+
+                    _ => {
+                        return Err(format!(
+                            "the value in {} can only be saved to memory; it is not a valid input",
+                            R[x]
+                        ));
+                    }
+                }
+            }
         }
 
         // next record register write
         if let Some((_, write)) = &effects.reg_write {
             let x = write.register;
             self.valid[x] = true;
+            self.save_only[x] = false;
 
             // mv clones a value
             if let Field::Opcode("mv") = instruction.fields[0] {
@@ -2943,6 +2970,7 @@ impl Linter {
                 self.stack.push(FunctionRegisters {
                     at_entry: self.at_entry,
                     valid: self.valid,
+                    save_only: self.save_only,
                     at_entry_sp: self.at_entry_sp,
                 });
 
@@ -2983,11 +3011,13 @@ impl Linter {
                 }
 
                 // make sure all s registers have a number
+                self.save_only = [false; 32];
                 for &x in &S_REGS {
                     if self.registers[x].is_none() {
                         self.registers[x] = Some(self.new_n());
                     }
                     self.valid[x] = true;
+                    self.save_only[x] = true;
                 }
 
                 // record the registers at function entry time
@@ -3027,11 +3057,13 @@ impl Linter {
                 if let Some(FunctionRegisters {
                     at_entry,
                     valid,
+                    save_only,
                     at_entry_sp,
                 }) = self.stack.pop()
                 {
                     self.at_entry = at_entry;
                     self.valid = valid;
+                    self.save_only = save_only;
                     self.at_entry_sp = at_entry_sp;
                 } else {
                     return Err("ret with no stack frame to return to".to_string());
