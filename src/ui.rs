@@ -1,23 +1,17 @@
 use super::*;
+use std::mem::take;
 
 use crossterm::{
     cursor::MoveTo,
     event::{self, Event, KeyCode, KeyEvent},
     execute, queue,
     style::{Color, Colors, Print, SetColors},
-    terminal::{Clear, ClearType},
     tty::IsTty,
 };
 
 macro_rules! serr {
     ($expr:expr) => {
         $expr.map_err(|e| format!("{}", e))
-    };
-}
-
-macro_rules! ferr {
-    ($expr:expr) => {
-        $expr.map_err(|_| fmt::Error)
     };
 }
 
@@ -53,21 +47,20 @@ struct Pane {
     cursor_y: u16,
     flow_down: bool,
     color: Colors,
-
-    output_buffer: Vec<u8>,
+    out: Vec<Vec<(char, Colors)>>,
 }
 
 impl Pane {
     fn new(
-        out: &mut Vec<u8>,
+        out: Vec<Vec<(char, Colors)>>,
         color: Colors,
         origin_x: u16,
         origin_y: u16,
         outer_width: u16,
         outer_height: u16,
         flow_down: bool,
-    ) -> Result<Self, String> {
-        let pane = Pane {
+    ) -> Self {
+        let mut pane = Pane {
             left: origin_x + 1,
             top: origin_y + 1,
             width: outer_width - 2,
@@ -76,72 +69,45 @@ impl Pane {
             cursor_x: 0,
             flow_down,
             color,
-            output_buffer: Vec::new(),
+            out,
         };
 
-        serr!(queue!(out, SetColors(color)))?;
-        serr!(queue!(out, MoveTo(origin_x, origin_y), Print("┌")))?;
-        serr!(pane.hline(out, origin_x + 1, origin_y, outer_width - 2))?;
-        serr!(queue!(
-            out,
-            MoveTo(origin_x + outer_width - 1, origin_y),
-            Print("┐")
-        ))?;
-        serr!(queue!(
-            out,
-            MoveTo(origin_x, origin_y + outer_height - 1),
-            Print("└")
-        ))?;
-        serr!(pane.hline(
-            out,
-            origin_x + 1,
-            origin_y + outer_height - 1,
-            outer_width - 2
-        ))?;
-        serr!(queue!(
-            out,
-            MoveTo(origin_x + outer_width - 1, origin_y + outer_height - 1),
-            Print("┘")
-        ))?;
-        serr!(pane.vline(out, origin_x, origin_y + 1, outer_height - 2))?;
-        serr!(pane.vline(
-            out,
-            origin_x + outer_width - 1,
-            origin_y + 1,
-            outer_height - 2
-        ))?;
-        Ok(pane)
+        pane.out[origin_y as usize][origin_x as usize] = ('┌', color);
+        pane.hline(origin_x + 1, origin_y, outer_width - 2);
+        pane.out[origin_y as usize][(origin_x + outer_width - 1) as usize] = ('┐', pane.color);
+
+        pane.out[(origin_y + outer_height - 1) as usize][origin_x as usize] = ('└', pane.color);
+        pane.hline(origin_x + 1, origin_y + outer_height - 1, outer_width - 2);
+        pane.out[(origin_y + outer_height - 1) as usize][(origin_x + outer_width - 1) as usize] =
+            ('┘', pane.color);
+        pane.vline(origin_x, origin_y + 1, outer_height - 2);
+        pane.vline(origin_x + outer_width - 1, origin_y + 1, outer_height - 2);
+        pane
     }
 
-    fn split_right(
-        &mut self,
-        out: &mut Vec<u8>,
-        width: u16,
-        flow_down: bool,
-        corners: &mut Vec<(u16, u16)>,
-    ) -> Result<Self, String> {
+    fn split_right(&mut self, width: u16, flow_down: bool, corners: &mut Vec<(u16, u16)>) -> Self {
         self.width -= width + 1;
         let (top_y, bot_y, x) = (self.top - 1, self.top + self.height, self.left + self.width);
 
         // draw the split line
-        self.vline(out, x, top_y + 1, self.height)?;
+        self.vline(x, top_y + 1, self.height);
 
         // draw top and bottom corners
-        let mut top_corner = "┼";
+        let mut top_corner = '┼';
         if !corners.contains(&(top_y, x)) {
             corners.push((top_y, x));
-            top_corner = "┬";
+            top_corner = '┬';
         }
-        serr!(queue!(out, MoveTo(x, top_y), Print(top_corner)))?;
+        self.out[top_y as usize][x as usize] = (top_corner, self.color);
 
-        let mut bot_corner = "┼";
+        let mut bot_corner = '┼';
         if !corners.contains(&(bot_y, x)) {
             corners.push((bot_y, x));
-            bot_corner = "┴";
+            bot_corner = '┴';
         }
-        serr!(queue!(out, MoveTo(x, bot_y), Print(bot_corner)))?;
+        self.out[bot_y as usize][x as usize] = (bot_corner, self.color);
 
-        Ok(Pane {
+        Pane {
             top: self.top,
             left: x + 1,
             height: self.height,
@@ -150,17 +116,16 @@ impl Pane {
             cursor_x: 0,
             flow_down,
             color: self.color,
-            output_buffer: Vec::new(),
-        })
+            out: take(&mut self.out),
+        }
     }
 
     fn split_bottom(
         &mut self,
-        out: &mut Vec<u8>,
         height: u16,
         flow_down: bool,
         corners: &mut Vec<(u16, u16)>,
-    ) -> Result<Self, String> {
+    ) -> Self {
         self.height -= height + 1;
         let (y, left_x, right_x) = (
             self.top + self.height,
@@ -169,27 +134,28 @@ impl Pane {
         );
 
         // draw the split line
-        self.hline(out, left_x + 1, y, self.width)?;
+        self.hline(left_x + 1, y, self.width);
 
         // draw left and righr corners
-        let mut left_corner = "┼";
+        let mut left_corner = '┼';
         if !corners.contains(&(y, left_x)) {
             corners.push((y, left_x));
-            left_corner = "├";
+            left_corner = '├';
         }
-        serr!(queue!(out, MoveTo(left_x, y), Print(left_corner)))?;
+        self.out[y as usize][left_x as usize] = (left_corner, self.color);
 
-        let mut right_corner = "┼";
+        let mut right_corner = '┼';
         if !corners.contains(&(y, right_x)) {
             corners.push((y, right_x));
-            right_corner = "┤";
+            right_corner = '┤';
         }
-        serr!(queue!(out, MoveTo(right_x, y), Print(right_corner)))?;
+        self.out[y as usize][right_x as usize] = (right_corner, self.color);
 
         if !self.flow_down {
             self.cursor_y = self.height - 1;
         }
-        Ok(Pane {
+
+        Pane {
             top: self.top + self.height + 1,
             left: self.left,
             height,
@@ -198,64 +164,41 @@ impl Pane {
             cursor_x: 0,
             flow_down,
             color: self.color,
-            output_buffer: Vec::new(),
-        })
-    }
-
-    fn hline(&self, out: &mut Vec<u8>, x: u16, y: u16, length: u16) -> Result<(), String> {
-        serr!(queue!(out, MoveTo(x, y)))?;
-        for _ in 0..length {
-            serr!(queue!(out, Print("─")))?;
+            out: take(&mut self.out),
         }
-        Ok(())
     }
 
-    fn vline(&self, out: &mut Vec<u8>, x: u16, y: u16, length: u16) -> Result<(), String> {
+    fn hline(&mut self, x: u16, y: u16, length: u16) {
+        for x in x..x + length {
+            self.out[y as usize][x as usize] = ('─', self.color);
+        }
+    }
+
+    fn vline(&mut self, x: u16, y: u16, length: u16) {
         for y in y..y + length {
-            serr!(queue!(out, MoveTo(x, y), Print("│")))?;
+            self.out[y as usize][x as usize] = ('│', self.color);
         }
-        Ok(())
     }
 
-    fn label(&mut self, msg: &str) -> Result<(), String> {
-        let msg = if msg.len() > self.width as usize - 4 {
-            &msg[..self.width as usize - 4]
-        } else {
-            msg
-        };
-        serr!(queue!(
-            &mut self.output_buffer,
-            SetColors(self.color),
-            MoveTo(self.left + 1, self.top - 1),
-            Print(" "),
-            Print(msg),
-            Print(" ")
-        ))
+    fn label(&mut self, msg: &str) {
+        self.write_padded_str(msg, self.left + 1, self.top - 1, self.width as usize - 4);
+    }
+
+    fn write_padded_str(&mut self, msg: &str, x: u16, y: u16, max_width: usize) {
+        let mut msg: Vec<_> = msg.chars().collect();
+        msg.truncate(max_width - 2);
+        msg.insert(0, ' ');
+        msg.push(' ');
+        for (i, &ch) in msg.iter().enumerate() {
+            self.out[y as usize][x as usize + i] = (ch, self.color);
+        }
     }
 }
 
 impl fmt::Write for Pane {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        ferr!(queue!(&mut self.output_buffer, SetColors(self.color)))?;
-
-        let mut buff = Vec::new();
         for c in s.chars() {
             if c == '\n' {
-                if !buff.is_empty() {
-                    if self.cursor_y < self.height && self.cursor_x < self.width {
-                        buff.truncate((self.width - self.cursor_x) as usize);
-                        ferr!(queue!(
-                            &mut self.output_buffer,
-                            MoveTo(self.left + self.cursor_x, self.top + self.cursor_y)
-                        ))?;
-                        ferr!(write!(
-                            &mut self.output_buffer,
-                            "{}",
-                            buff.iter().collect::<String>()
-                        ))?;
-                    }
-                    buff.clear();
-                }
                 self.cursor_x = 0;
                 if self.flow_down {
                     self.cursor_y += 1;
@@ -264,24 +207,12 @@ impl fmt::Write for Pane {
                 } else {
                     self.cursor_y = u16::MAX;
                 }
-            } else {
-                buff.push(c);
+            } else if self.cursor_x < self.width && self.cursor_y < self.height {
+                self.out[(self.top + self.cursor_y) as usize]
+                    [(self.left + self.cursor_x) as usize] = (c, self.color);
+                self.cursor_x += 1;
             }
         }
-        if !buff.is_empty() && self.cursor_y < self.height && self.cursor_x < self.width {
-            buff.truncate((self.width - self.cursor_x) as usize);
-            ferr!(queue!(
-                &mut self.output_buffer,
-                MoveTo(self.left + self.cursor_x, self.top + self.cursor_y)
-            ))?;
-            ferr!(write!(
-                &mut self.output_buffer,
-                "{}",
-                buff.iter().collect::<String>()
-            ))?;
-            self.cursor_x += buff.len() as u16;
-        }
-
         Ok(())
     }
 }
@@ -392,26 +323,16 @@ impl Tui {
         loop {
             // Draw the current state
             let source_height = self.draw()?;
-            let event = serr!(event::read())?;
-            match event {
-                // watch for quit
-                Event::Key(KeyEvent {
-                    code: KeyCode::Char('q'),
-                    ..
-                }) => {
-                    return Ok(());
+            if let Event::Key(key_event) = serr!(event::read())? {
+                if self.handle_key(key_event, source_height)? {
+                    break;
                 }
-
-                // handle all the other keys
-                Event::Key(key_event) => self.handle_key(key_event, source_height)?,
-
-                // ignore other events
-                _ => (),
             }
         }
+        Ok(())
     }
 
-    fn handle_key(&mut self, key_event: KeyEvent, source_height: u16) -> Result<(), String> {
+    fn handle_key(&mut self, key_event: KeyEvent, source_height: u16) -> Result<bool, String> {
         match key_event.code {
             _ if self.show_help => {
                 self.show_help = false;
@@ -567,10 +488,14 @@ impl Tui {
                 self.show_data = !self.show_data;
             }
 
+            KeyCode::Char('q') => {
+                return Ok(true);
+            }
+
             // ignore other keys
             _ => {}
         }
-        Ok(())
+        Ok(false)
     }
 
     fn set_cursor_to_current(&mut self) {
@@ -585,31 +510,33 @@ impl Tui {
 
         // build the screen layout
         let mut out = Vec::new();
-        serr!(queue!(
-            out,
-            SetColors(self.normal_color),
-            Clear(ClearType::All)
-        ))?;
+        for _ in 0..size_y {
+            out.push(vec![(' ', self.normal_color); size_x as usize]);
+        }
         let mut corners = Vec::new();
-        let mut source = Pane::new(&mut out, self.normal_color, 0, 0, size_x, size_y, true)?;
+        let mut source = Pane::new(out, self.normal_color, 0, 0, size_x, size_y, true);
+
         // an 80-column terminal gets source and memory views, narrower does not
-        let (stack, data) = if size_x >= 80
+        let (stack, data, out) = if size_x >= 80
             && (self.show_stack || self.show_data && self.machine.data_start > 0)
         {
-            let mut mem = source.split_right(&mut out, 39, false, &mut corners)?;
+            let mut mem = source.split_right(39, false, &mut corners);
             if mem.height >= 22 && self.show_stack && self.show_data && self.machine.data_start > 0
             {
-                let data = mem.split_bottom(&mut out, mem.height * 2 / 3, false, &mut corners)?;
-                (Some(mem), Some(data))
+                let mut data = mem.split_bottom(mem.height * 2 / 3, false, &mut corners);
+                let out = take(&mut data.out);
+                (Some(mem), Some(data), out)
             } else if self.show_stack
                 && (self.machine.most_recent_memory >= self.machine.stack_start || !self.show_data)
             {
-                (Some(mem), None)
+                let out = take(&mut mem.out);
+                (Some(mem), None, out)
             } else {
-                (None, Some(mem))
+                let out = take(&mut mem.out);
+                (None, Some(mem), out)
             }
         } else {
-            (None, None)
+            (None, None, take(&mut source.out))
         };
 
         let output_lines = if self.show_output && !self.machine.stdout.is_empty() {
@@ -625,7 +552,8 @@ impl Tui {
         };
 
         // a 24-line terminal gets source, registers, and output, shorter does not
-        let (registers, output) = if source.height >= 22
+        source.out = out;
+        let (registers, output, mut out) = if source.height >= 22
             && self.show_registers
             && self.show_output
             && !self.machine.stdout.is_empty()
@@ -641,9 +569,10 @@ impl Tui {
 
             // keep at least 4 lines but otherwise don't grow beyond the amount of output
             let lines = output_lines.max(output_min).min(natural_size);
-            let mut registers = source.split_bottom(&mut out, 5 + lines, true, &mut corners)?;
-            let output = registers.split_bottom(&mut out, lines, true, &mut corners)?;
-            (Some(registers), Some(output))
+            let mut registers = source.split_bottom(5 + lines, true, &mut corners);
+            let mut output = registers.split_bottom(lines, true, &mut corners);
+            let out = take(&mut output.out);
+            (Some(registers), Some(output), out)
         } else if source.height >= 17 && !self.show_registers && output_lines > 0 {
             let surplus = source.height.saturating_sub(12).saturating_sub(5);
 
@@ -652,58 +581,62 @@ impl Tui {
             let surplus = surplus.saturating_sub(5);
             let natural_size = output_min + (surplus + 2) / 3;
             let lines = output_lines.max(4).min(natural_size);
-            let output = source.split_bottom(&mut out, lines, true, &mut corners)?;
-            (None, Some(output))
+            let mut output = source.split_bottom(lines, true, &mut corners);
+            let out = take(&mut output.out);
+            (None, Some(output), out)
         } else if source.height >= 17 && self.show_registers {
-            let registers = source.split_bottom(&mut out, 4, true, &mut corners)?;
-            (Some(registers), None)
+            let mut registers = source.split_bottom(4, true, &mut corners);
+            let out = take(&mut registers.out);
+            (Some(registers), None, out)
         } else {
-            (None, None)
+            (None, None, take(&mut source.out))
         };
 
         // now render each pane
-        let mut status_line = self.render_source(&mut source)?;
-        out.append(&mut source.output_buffer);
+        source.out = out;
+        let status_line = self.render_source(&mut source);
         if !status_line.is_empty() {
-            status_line.truncate(size_x.saturating_sub(6) as usize);
-            serr!(queue!(
-                out,
-                MoveTo(2, size_y - 1),
-                SetColors(self.normal_color),
-                Print(" "),
-                Print(&status_line),
-                Print(" ")
-            ))?;
+            source.write_padded_str(
+                &status_line,
+                2,
+                size_y - 1,
+                size_x.saturating_sub(4) as usize,
+            );
         }
-        let help_msg = " ? for help ";
+        let help_msg = "? for help";
         if size_x >= status_line.len() as u16 + help_msg.len() as u16 + 8 {
-            serr!(queue!(
-                out,
-                MoveTo(size_x - 3 - help_msg.len() as u16, size_y - 1),
-                SetColors(self.normal_color),
-                Print(help_msg)
-            ))?;
+            source.write_padded_str(
+                help_msg,
+                size_x - 3 - help_msg.len() as u16,
+                size_y - 1,
+                help_msg.len() + 2,
+            );
         }
 
+        out = take(&mut source.out);
         if let Some(mut registers) = registers {
-            self.render_registers(&mut registers)?;
-            out.append(&mut registers.output_buffer);
+            registers.out = out;
+            self.render_registers(&mut registers);
+            out = take(&mut registers.out);
         }
         if let Some(mut stack) = stack {
-            self.render_memory(&mut stack, true)?;
-            out.append(&mut stack.output_buffer);
+            stack.out = out;
+            self.render_memory(&mut stack, true);
+            out = take(&mut stack.out);
         }
         if let Some(mut data) = data {
-            self.render_memory(&mut data, false)?;
-            out.append(&mut data.output_buffer);
+            data.out = out;
+            self.render_memory(&mut data, false);
+            out = take(&mut data.out);
         }
         if let Some(mut output) = output {
-            self.render_output(&mut output)?;
-            out.append(&mut output.output_buffer);
+            output.out = out;
+            self.render_output(&mut output);
+            out = take(&mut output.out);
         }
 
         if self.show_help {
-            let (help_x, help_y) = (63, 22);
+            let (help_x, help_y) = (63, 20);
             let (left, width) = if size_x >= help_x + 2 {
                 let space = (size_x - (help_x + 2)) / 2;
                 (space, help_x + 2)
@@ -716,18 +649,29 @@ impl Tui {
             } else {
                 (0, size_y)
             };
-            let mut help = Pane::new(&mut out, self.normal_color, left, top, width, height, true)?;
-            self.render_help(&mut help)?;
-            out.append(&mut help.output_buffer);
+            let mut help = Pane::new(out, self.normal_color, left, top, width, height, true);
+            self.render_help(&mut help);
+            out = take(&mut help.out);
         }
 
         let mut stdout = io::stdout();
-        serr!(stdout.write_all(&out))?;
+        for (y, row) in out.iter().enumerate() {
+            serr!(queue!(stdout, MoveTo(0, y as u16)))?;
+            let mut buff = String::new();
+            for (x, &(ch, color)) in row.iter().enumerate() {
+                buff.push(ch);
+                if x + 1 == row.len() || row[x + 1].1 != color {
+                    serr!(queue!(stdout, SetColors(color), Print(&buff)))?;
+                    buff.clear();
+                }
+            }
+        }
         serr!(stdout.flush())?;
+
         Ok(source.height)
     }
 
-    fn render_source(&self, pane: &mut Pane) -> Result<String, String> {
+    fn render_source(&self, pane: &mut Pane) -> String {
         // find the instruction
         let effects = &self.sequence[self.sequence_index];
         let pc = effects.instruction.address;
@@ -750,7 +694,7 @@ impl Tui {
             )
         };
 
-        pane.label(&label)?;
+        pane.label(&label);
 
         // are we drawing a branch arrow?
         let (arrow_top_addr, arrow_bottom_addr) = if self.instructions[pc_i].branches() {
@@ -772,7 +716,7 @@ impl Tui {
             // handle out-of-range lines
             if i < 0 || i >= self.instructions.len() as i64 {
                 pane.color = self.normal_color;
-                serr!(writeln!(pane))?;
+                writeln!(pane).unwrap();
                 continue;
             }
 
@@ -806,7 +750,7 @@ impl Tui {
             } else {
                 pane.color = self.normal_color;
             }
-            serr!(writeln!(pane, "{}", line))?;
+            writeln!(pane, "{}", line).unwrap();
         }
 
         // draw the side-effects label
@@ -815,13 +759,11 @@ impl Tui {
         if side_effects[0].is_empty() {
             side_effects.remove(0);
         }
-        let status = side_effects.join(", ");
-
-        Ok(status)
+        side_effects.join(", ")
     }
 
-    fn render_registers(&mut self, pane: &mut Pane) -> Result<(), String> {
-        pane.label("Registers")?;
+    fn render_registers(&mut self, pane: &mut Pane) {
+        pane.label("Registers");
 
         let lines = vec![
             vec!["ra", "sp", "gp", "tp"],
@@ -837,20 +779,19 @@ impl Tui {
                     .machine
                     .get(R.iter().position(|&r_str| r_str == reg).unwrap());
                 if self.hex_mode && !(0..=9).contains(&val) {
-                    serr!(write!(pane, "{}:{:#x} ", reg, val))?;
+                    write!(pane, "{}:{:#x} ", reg, val).unwrap();
                 } else {
-                    serr!(write!(pane, "{}:{:} ", reg, val))?;
+                    write!(pane, "{}:{:} ", reg, val).unwrap();
                 }
             }
-            serr!(writeln!(pane))?;
+            writeln!(pane).unwrap();
         }
-        Ok(())
     }
 
-    fn render_memory(&mut self, pane: &mut Pane, is_stack: bool) -> Result<(), String> {
+    fn render_memory(&mut self, pane: &mut Pane, is_stack: bool) {
         let mut stack_colors = Vec::new();
         let (colors, start, mem_start, mem_end, most_recent_start, most_recent_end) = if is_stack {
-            pane.label("Stack")?;
+            pane.label("Stack");
 
             // make a color list for stack frame boundaries
             // start at high-numbered addresses so colors are consistent
@@ -887,7 +828,7 @@ impl Tui {
                 mr_start + mr_size as i64,
             )
         } else {
-            pane.label("Data")?;
+            pane.label("Data");
 
             let (start, _end) = calc_range(
                 ((self.machine.data_end - self.machine.data_start) / 8) as usize,
@@ -946,16 +887,16 @@ impl Tui {
             // print the line
             pane.color = self.normal_color;
             if let Some(addr) = addr_to_print {
-                serr!(write!(pane, "{:06x}:", addr))?;
+                write!(pane, "{:06x}:", addr).unwrap();
             } else {
-                serr!(write!(pane, "       "))?;
+                write!(pane, "       ").unwrap();
             }
 
             // print the bytes as hex
             for j in 0..8 {
                 if let (Some(byte), color) = bytes[j] {
                     pane.color = color;
-                    serr!(write!(pane, "{:02x}", byte))?;
+                    write!(pane, "{:02x}", byte).unwrap();
 
                     // trailing space?
                     if j + 1 < 8 {
@@ -963,147 +904,151 @@ impl Tui {
                             (Some(_), next_color) if color == next_color => {}
                             _ => pane.color = self.normal_color,
                         }
-                        serr!(write!(pane, " "))?;
+                        write!(pane, " ").unwrap();
                     }
                 } else {
                     pane.color = self.normal_color;
                     if j + 1 < 8 {
-                        serr!(write!(pane, "   "))?;
+                        write!(pane, "   ").unwrap();
                     } else {
-                        serr!(write!(pane, "  "))?;
+                        write!(pane, "  ").unwrap();
                     }
                 }
             }
 
             pane.color = self.normal_color;
-            serr!(write!(pane, " "))?;
+            write!(pane, " ").unwrap();
 
             // print the bytes as ascii
             for &maybe_byte in &bytes {
                 if let (Some(byte), color) = maybe_byte {
                     pane.color = color;
                     if byte as char >= ' ' && byte as char <= '~' {
-                        serr!(write!(pane, "{}", byte as char))?;
+                        write!(pane, "{}", byte as char).unwrap();
                     } else {
-                        serr!(write!(pane, "·"))?;
+                        write!(pane, "·").unwrap();
                     }
                 } else {
                     pane.color = self.normal_color;
-                    serr!(write!(pane, " "))?;
+                    write!(pane, " ").unwrap();
                 }
             }
 
-            serr!(write!(pane, "\n"))?;
+            writeln!(pane).unwrap();
         }
-
-        Ok(())
     }
 
-    fn render_output(&mut self, pane: &mut Pane) -> Result<(), String> {
-        pane.label("Output")?;
+    fn render_output(&mut self, pane: &mut Pane) {
+        pane.label("Output");
 
         for line in get_last_n_lines(&self.machine.stdout, pane.height as usize) {
-            serr!(writeln!(pane, "{}", line))?;
+            writeln!(pane, "{}", line).unwrap();
         }
-
-        Ok(())
     }
 
-    fn render_help(&mut self, pane: &mut Pane) -> Result<(), String> {
-        pane.label("Help")?;
+    fn render_help(&mut self, pane: &mut Pane) {
+        pane.label("Help");
 
-        serr!((|| {
-            writeln!(
-                pane,
-                "                                                               "
-            )?;
-            writeln!(
-                pane,
-                " To move the cursor without stepping:                          "
-            )?;
-            writeln!(
-                pane,
-                "   ↑/up arrow       : move cursor up one instruction           "
-            )?;
-            writeln!(
-                pane,
-                "   ↓/down arrow     : move cursor down one instruction         "
-            )?;
-            writeln!(
-                pane,
-                "   PgUp/Fn-↑        : move cursor up one page                  "
-            )?;
-            writeln!(
-                pane,
-                "   PgDown/Fn-↓      : move cursor down one page                "
-            )?;
-            writeln!(
-                pane,
-                "                                                               "
-            )?;
-            writeln!(
-                pane,
-                " To step forward/rewind through program:                       "
-            )?;
-            writeln!(
-                pane,
-                "   →/right arrow    : step forward one instruction             "
-            )?;
-            writeln!(
-                pane,
-                "   ←/left arrow     : rewind one instruction                   "
-            )?;
-            writeln!(
-                pane,
-                "   end key/Fn-→     : fast forward to end of current function  "
-            )?;
-            writeln!(
-                pane,
-                "   home key/Fn-←    : rewind to start of current function      "
-            )?;
-            writeln!(
-                pane,
-                "   enter/return     : fast forward to instruction under cursor "
-            )?;
-            writeln!(
-                pane,
-                "   backspace/delete : rewind to instruction under cursor       "
-            )?;
-            writeln!(
-                pane,
-                "                                                               "
-            )?;
-            writeln!(
-                pane,
-                " Toggles:                                                      "
-            )?;
-            writeln!(
-                pane,
-                "   x                : switch between hexadecimal/decimal mode  "
-            )?;
-            writeln!(
-                pane,
-                "   r                : hide/show register window pane           "
-            )?;
-            writeln!(
-                pane,
-                "   o                : hide/show output window pane             "
-            )?;
-            writeln!(
-                pane,
-                "   s                : hide/show stack segment window pane      "
-            )?;
-            writeln!(
-                pane,
-                "   d                : hide/show data segment window pane       "
-            )?;
-            writeln!(
-                pane,
-                "                                                               "
-            )
-        })())?;
-
-        Ok(())
+        writeln!(
+            pane,
+            " To move the cursor without stepping:                          "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            "   ↑/up arrow       : move cursor up one instruction           "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            "   ↓/down arrow     : move cursor down one instruction         "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            "   PgUp/Fn-↑        : move cursor up one page                  "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            "   PgDown/Fn-↓      : move cursor down one page                "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            "                                                               "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            " To step forward/rewind through program:                       "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            "   →/right arrow    : step forward one instruction             "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            "   ←/left arrow     : rewind one instruction                   "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            "   end key/Fn-→     : fast forward to end of current function  "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            "   home key/Fn-←    : rewind to start of current function      "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            "   enter/return     : fast forward to instruction under cursor "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            "   backspace/delete : rewind to instruction under cursor       "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            "                                                               "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            " Toggles:                                                      "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            "   x                : switch between hexadecimal/decimal mode  "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            "   r                : hide/show register window pane           "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            "   o                : hide/show output window pane             "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            "   s                : hide/show stack segment window pane      "
+        )
+        .unwrap();
+        writeln!(
+            pane,
+            "   d                : hide/show data segment window pane       "
+        )
+        .unwrap();
     }
 }
 
