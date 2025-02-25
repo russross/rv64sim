@@ -4,7 +4,7 @@ use std::mem::take;
 use crossterm::{
     cursor::MoveTo,
     event::{self, Event, KeyCode, KeyEvent},
-    execute, queue,
+    queue,
     style::{Color, Colors, Print, SetColors},
     tty::IsTty,
 };
@@ -240,7 +240,7 @@ impl Tui {
 
         // take over terminal
         serr!(crossterm::terminal::enable_raw_mode())?;
-        serr!(execute!(
+        serr!(queue!(
             io::stdout(),
             crossterm::terminal::EnterAlternateScreen,
             crossterm::cursor::Hide
@@ -1056,7 +1056,7 @@ impl Drop for Tui {
     fn drop(&mut self) {
         if let Err(e) = (|| {
             crossterm::terminal::disable_raw_mode()?;
-            execute!(
+            queue!(
                 std::io::stdout(),
                 crossterm::terminal::LeaveAlternateScreen,
                 crossterm::cursor::Show

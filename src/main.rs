@@ -10,7 +10,8 @@ use std::io::{self, Read, Write};
 use std::os::unix::io::AsRawFd;
 use std::rc::Rc;
 
-const STACK_SIZE: i64 = 4096;
+const STACK_SIZE: i64 = 8192;
+const MAX_STEPS_DEFAULT: usize = 100000000;
 
 struct Segment {
     start: i64,
@@ -3242,6 +3243,7 @@ fn main() -> Result<(), String> {
 
     let mut usage = false;
     let mut i = 1;
+    let mut max_steps = MAX_STEPS_DEFAULT;
     while i < args.len() {
         match args[i].as_str() {
             "-m" | "--mode" => {
@@ -3253,7 +3255,7 @@ fn main() -> Result<(), String> {
                         usage = true;
                     }
                 } else {
-                    eprintln!("missing argument for mode");
+                    eprintln!("missing argument for {}", args[i]);
                     usage = true;
                 }
             }
@@ -3262,7 +3264,7 @@ fn main() -> Result<(), String> {
                 if i < args.len() {
                     executable = args[i].clone();
                 } else {
-                    eprintln!("missing argument for executable");
+                    eprintln!("missing argument for {}", args[i]);
                     usage = true;
                 }
             }
@@ -3275,7 +3277,21 @@ fn main() -> Result<(), String> {
                         usage = true;
                     }
                 } else {
-                    eprintln!("missing argument for lint");
+                    eprintln!("missing argument for {}", args[i]);
+                    usage = true;
+                }
+            }
+            "-s" | "--steps" => {
+                i += 1;
+                if i < args.len() {
+                    if let Ok(steps) = args[i].parse::<usize>() {
+                        max_steps = steps;
+                    } else {
+                        eprintln!("{} with invalid number of steps {}", args[i - 1], args[i]);
+                        usage = true;
+                    };
+                } else {
+                    eprintln!("missing argument for {}", args[i]);
                     usage = true;
                 }
             }
@@ -3293,6 +3309,10 @@ fn main() -> Result<(), String> {
             "  -l, --list <true|false>            Apply strict ABI and other checks (default true)"
         );
         eprintln!("  -m, --mode <run|trace|dasm|debug>  Simulator Mode (default run)");
+        eprintln!(
+            "  -s, --steps <count>                Maximum steps to run (default {})",
+            MAX_STEPS_DEFAULT
+        );
         eprintln!("  -h, --help                         Show this help");
         std::process::exit(1);
     }
@@ -3333,7 +3353,7 @@ fn main() -> Result<(), String> {
         &instructions,
         &addresses,
         lint == "true",
-        100000000,
+        max_steps,
         &mode,
     );
 
