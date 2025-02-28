@@ -6,320 +6,320 @@
                 .text
 
 _start:
-				# test addi
-				la      a0, test_addi_msg
-				call	print_string
-				call	test_addi
+                # test addi
+                la      a0, test_addi_msg
+                call    print_string
+                call    test_addi
 
-				# test addiw
-				la      a0, test_addiw_msg
-				call	print_string
-				call	test_addiw
+                # test addiw
+                la      a0, test_addiw_msg
+                call    print_string
+                call    test_addiw
 
-				# test add
-				la      a0, test_add_msg
-				call	print_string
-				call	test_add
+                # test add
+                la      a0, test_add_msg
+                call    print_string
+                call    test_add
 
-				# test addw
-				la      a0, test_addw_msg
-				call	print_string
-				call	test_addw
+                # test addw
+                la      a0, test_addw_msg
+                call    print_string
+                call    test_addw
 
-				# test andi
-				la      a0, test_andi_msg
-				call	print_string
-				call	test_andi
+                # test andi
+                la      a0, test_andi_msg
+                call    print_string
+                call    test_andi
 
-				# test and
-				la      a0, test_and_msg
-				call	print_string
-				call	test_and
+                # test and
+                la      a0, test_and_msg
+                call    print_string
+                call    test_and
 
-				# test auipc
-				la      a0, test_auipc_msg
-				call	print_string
-				call	test_auipc
+                # test auipc
+                la      a0, test_auipc_msg
+                call    print_string
+                call    test_auipc
 
-				# test beq
-				la      a0, test_beq_msg
-				call	print_string
-				call	test_beq
+                # test beq
+                la      a0, test_beq_msg
+                call    print_string
+                call    test_beq
 
-				# test bge
-				la      a0, test_bge_msg
-				call	print_string
-				call	test_bge
+                # test bge
+                la      a0, test_bge_msg
+                call    print_string
+                call    test_bge
 
-				# test bgeu
-				la      a0, test_bgeu_msg
-				call	print_string
-				call	test_bgeu
+                # test bgeu
+                la      a0, test_bgeu_msg
+                call    print_string
+                call    test_bgeu
 
-				# test blt
-				la      a0, test_blt_msg
-				call	print_string
-				call	test_blt
+                # test blt
+                la      a0, test_blt_msg
+                call    print_string
+                call    test_blt
 
-				# test bltu
-				la      a0, test_bltu_msg
-				call	print_string
-				call	test_bltu
+                # test bltu
+                la      a0, test_bltu_msg
+                call    print_string
+                call    test_bltu
 
-				# test bne
-				la      a0, test_bne_msg
-				call	print_string
-				call	test_bne
+                # test bne
+                la      a0, test_bne_msg
+                call    print_string
+                call    test_bne
 
-				# test div
-				la      a0, test_div_msg
-				call	print_string
-				call	test_div
+                # test div
+                la      a0, test_div_msg
+                call    print_string
+                call    test_div
 
-				# test divu
-				la      a0, test_divu_msg
-				call	print_string
-				call	test_divu
+                # test divu
+                la      a0, test_divu_msg
+                call    print_string
+                call    test_divu
 
-				# test divuw
-				la      a0, test_divuw_msg
-				call	print_string
-				call	test_divuw
+                # test divuw
+                la      a0, test_divuw_msg
+                call    print_string
+                call    test_divuw
 
-				# test divw
-				la      a0, test_divw_msg
-				call	print_string
-				call	test_divw
+                # test divw
+                la      a0, test_divw_msg
+                call    print_string
+                call    test_divw
 
-				# test jalr
-				la      a0, test_jalr_msg
-				call	print_string
-				call	test_jalr
+                # test jalr
+                la      a0, test_jalr_msg
+                call    print_string
+                call    test_jalr
 
-				# test jal
-				la      a0, test_jal_msg
-				call	print_string
-				call	test_jal
+                # test jal
+                la      a0, test_jal_msg
+                call    print_string
+                call    test_jal
 
-				# test lb
-				la      a0, test_lb_msg
-				call	print_string
-				call	test_lb
+                # test lb
+                la      a0, test_lb_msg
+                call    print_string
+                call    test_lb
 
-				# test lbu
-				la      a0, test_lbu_msg
-				call	print_string
-				call	test_lbu
+                # test lbu
+                la      a0, test_lbu_msg
+                call    print_string
+                call    test_lbu
 
-				# test ld
-				la      a0, test_ld_msg
-				call	print_string
-				call	test_ld
+                # test ld
+                la      a0, test_ld_msg
+                call    print_string
+                call    test_ld
 
-				# test lh
-				la      a0, test_lh_msg
-				call	print_string
-				call	test_lh
+                # test lh
+                la      a0, test_lh_msg
+                call    print_string
+                call    test_lh
 
-				# test lhu
-				la      a0, test_lhu_msg
-				call	print_string
-				call	test_lhu
+                # test lhu
+                la      a0, test_lhu_msg
+                call    print_string
+                call    test_lhu
 
-				# test lui
-				la      a0, test_lui_msg
-				call	print_string
-				call	test_lui
+                # test lui
+                la      a0, test_lui_msg
+                call    print_string
+                call    test_lui
 
-				# test lw
-				la      a0, test_lw_msg
-				call	print_string
-				call	test_lw
+                # test lw
+                la      a0, test_lw_msg
+                call    print_string
+                call    test_lw
 
-				# test lwu
-				la      a0, test_lwu_msg
-				call	print_string
-				call	test_lwu
+                # test lwu
+                la      a0, test_lwu_msg
+                call    print_string
+                call    test_lwu
 
-				# test mulh
-				la      a0, test_mulh_msg
-				call	print_string
-				call	test_mulh
+                # test mulh
+                la      a0, test_mulh_msg
+                call    print_string
+                call    test_mulh
 
-				# test mulhsu
-				la      a0, test_mulhsu_msg
-				call	print_string
-				call	test_mulhsu
+                # test mulhsu
+                la      a0, test_mulhsu_msg
+                call    print_string
+                call    test_mulhsu
 
-				# test mulhu
-				la      a0, test_mulhu_msg
-				call	print_string
-				call	test_mulhu
+                # test mulhu
+                la      a0, test_mulhu_msg
+                call    print_string
+                call    test_mulhu
 
-				# test mul
-				la      a0, test_mul_msg
-				call	print_string
-				call	test_mul
+                # test mul
+                la      a0, test_mul_msg
+                call    print_string
+                call    test_mul
 
-				# test mulw
-				la      a0, test_mulw_msg
-				call	print_string
-				call	test_mulw
+                # test mulw
+                la      a0, test_mulw_msg
+                call    print_string
+                call    test_mulw
 
-				# test ori
-				la      a0, test_ori_msg
-				call	print_string
-				call	test_ori
+                # test ori
+                la      a0, test_ori_msg
+                call    print_string
+                call    test_ori
 
-				# test or
-				la      a0, test_or_msg
-				call	print_string
-				call	test_or
+                # test or
+                la      a0, test_or_msg
+                call    print_string
+                call    test_or
 
-				# test rem
-				la      a0, test_rem_msg
-				call	print_string
-				call	test_rem
+                # test rem
+                la      a0, test_rem_msg
+                call    print_string
+                call    test_rem
 
-				# test remu
-				la      a0, test_remu_msg
-				call	print_string
-				call	test_remu
+                # test remu
+                la      a0, test_remu_msg
+                call    print_string
+                call    test_remu
 
-				# test remuw
-				la      a0, test_remuw_msg
-				call	print_string
-				call	test_remuw
+                # test remuw
+                la      a0, test_remuw_msg
+                call    print_string
+                call    test_remuw
 
-				# test remw
-				la      a0, test_remw_msg
-				call	print_string
-				call	test_remw
+                # test remw
+                la      a0, test_remw_msg
+                call    print_string
+                call    test_remw
 
-				# test sb
-				la      a0, test_sb_msg
-				call	print_string
-				call	test_sb
+                # test sb
+                la      a0, test_sb_msg
+                call    print_string
+                call    test_sb
 
-				# test sd
-				la      a0, test_sd_msg
-				call	print_string
-				call	test_sd
+                # test sd
+                la      a0, test_sd_msg
+                call    print_string
+                call    test_sd
 
-				# test sh
-				la      a0, test_sh_msg
-				call	print_string
-				call	test_sh
+                # test sh
+                la      a0, test_sh_msg
+                call    print_string
+                call    test_sh
 
-				# test slli
-				la      a0, test_slli_msg
-				call	print_string
-				call	test_slli
+                # test slli
+                la      a0, test_slli_msg
+                call    print_string
+                call    test_slli
 
-				# test slliw
-				la      a0, test_slliw_msg
-				call	print_string
-				call	test_slliw
+                # test slliw
+                la      a0, test_slliw_msg
+                call    print_string
+                call    test_slliw
 
-				# test sll
-				la      a0, test_sll_msg
-				call	print_string
-				call	test_sll
+                # test sll
+                la      a0, test_sll_msg
+                call    print_string
+                call    test_sll
 
-				# test sllw
-				la      a0, test_sllw_msg
-				call	print_string
-				call	test_sllw
+                # test sllw
+                la      a0, test_sllw_msg
+                call    print_string
+                call    test_sllw
 
-				# test slti
-				la      a0, test_slti_msg
-				call	print_string
-				call	test_slti
+                # test slti
+                la      a0, test_slti_msg
+                call    print_string
+                call    test_slti
 
-				# test sltiu
-				la      a0, test_sltiu_msg
-				call	print_string
-				call	test_sltiu
+                # test sltiu
+                la      a0, test_sltiu_msg
+                call    print_string
+                call    test_sltiu
 
-				# test slt
-				la      a0, test_slt_msg
-				call	print_string
-				call	test_slt
+                # test slt
+                la      a0, test_slt_msg
+                call    print_string
+                call    test_slt
 
-				# test sltu
-				la      a0, test_sltu_msg
-				call	print_string
-				call	test_sltu
+                # test sltu
+                la      a0, test_sltu_msg
+                call    print_string
+                call    test_sltu
 
-				# test srai
-				la      a0, test_srai_msg
-				call	print_string
-				call	test_srai
+                # test srai
+                la      a0, test_srai_msg
+                call    print_string
+                call    test_srai
 
-				# test sraiw
-				la      a0, test_sraiw_msg
-				call	print_string
-				call	test_sraiw
+                # test sraiw
+                la      a0, test_sraiw_msg
+                call    print_string
+                call    test_sraiw
 
-				# test sra
-				la      a0, test_sra_msg
-				call	print_string
-				call	test_sra
+                # test sra
+                la      a0, test_sra_msg
+                call    print_string
+                call    test_sra
 
-				# test sraw
-				la      a0, test_sraw_msg
-				call	print_string
-				call	test_sraw
+                # test sraw
+                la      a0, test_sraw_msg
+                call    print_string
+                call    test_sraw
 
-				# test srli
-				la      a0, test_srli_msg
-				call	print_string
-				call	test_srli
+                # test srli
+                la      a0, test_srli_msg
+                call    print_string
+                call    test_srli
 
-				# test srliw
-				la      a0, test_srliw_msg
-				call	print_string
-				call	test_srliw
+                # test srliw
+                la      a0, test_srliw_msg
+                call    print_string
+                call    test_srliw
 
-				# test srl
-				la      a0, test_srl_msg
-				call	print_string
-				call	test_srl
+                # test srl
+                la      a0, test_srl_msg
+                call    print_string
+                call    test_srl
 
-				# test srlw
-				la      a0, test_srlw_msg
-				call	print_string
-				call	test_srlw
+                # test srlw
+                la      a0, test_srlw_msg
+                call    print_string
+                call    test_srlw
 
-				# test sub
-				la      a0, test_sub_msg
-				call	print_string
-				call	test_sub
+                # test sub
+                la      a0, test_sub_msg
+                call    print_string
+                call    test_sub
 
-				# test subw
-				la      a0, test_subw_msg
-				call	print_string
-				call	test_subw
+                # test subw
+                la      a0, test_subw_msg
+                call    print_string
+                call    test_subw
 
-				# test sw
-				la      a0, test_sw_msg
-				call	print_string
-				call	test_sw
+                # test sw
+                la      a0, test_sw_msg
+                call    print_string
+                call    test_sw
 
-				# test xori
-				la      a0, test_xori_msg
-				call	print_string
-				call	test_xori
+                # test xori
+                la      a0, test_xori_msg
+                call    print_string
+                call    test_xori
 
-				# test xor
-				la      a0, test_xor_msg
-				call	print_string
-				call	test_xor
+                # test xor
+                la      a0, test_xor_msg
+                call    print_string
+                call    test_xor
 
-				# test ma_data
-				la      a0, test_ma_data_msg
-				call	print_string
-				call	test_ma_data
+                # test ma_data
+                la      a0, test_ma_data_msg
+                call    print_string
+                call    test_ma_data
 
                 # finished all tests
                 la      a0, finished_msg
