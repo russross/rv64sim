@@ -21,6 +21,7 @@ pub struct Tui {
     machine: Machine,
     instructions: Vec<Rc<Instruction>>,
     addresses: HashMap<i64, usize>,
+    pseudo_addresses: HashMap<usize, usize>,
     sequence: Vec<Effects>,
     sequence_index: usize,
     cursor_index: usize,
@@ -47,6 +48,7 @@ impl Tui {
         machine: Machine,
         instructions: Vec<Rc<Instruction>>,
         addresses: HashMap<i64, usize>,
+        pseudo_addresses: HashMap<usize, usize>,
         sequence: Vec<Effects>,
     ) -> Result<Self, String> {
         // make sure stdout is connected to a tty
@@ -120,6 +122,7 @@ impl Tui {
             machine,
             instructions,
             addresses,
+            pseudo_addresses,
             sequence,
             sequence_index: 0,
             cursor_index: 0,
@@ -484,8 +487,8 @@ impl Tui {
         pane.label(&label);
 
         // are we drawing a branch arrow?
-        let (arrow_top_addr, arrow_bottom_addr) = if self.instructions[pc_i].op.branch_target(pc).is_some() {
-            let (old, new) = self.sequence[self.sequence_index].pc;
+        let (arrow_top_addr, arrow_bottom_addr) = if effects.instruction.op.branch_target(pc).is_some() {
+            let (old, new) = effects.pc;
             if new != old && (pc_i + 1 >= self.instructions.len() || new != self.instructions[pc_i + 1].address) {
                 (old.min(new), old.max(new))
             } else {
@@ -495,47 +498,30 @@ impl Tui {
             (-1, -1)
         };
 
-        let (start, end) = if self.verbose {
-            calc_range(self.instructions.len(), self.cursor_index, pane.height)
+        let (length, pc_index, cursor_index) = if self.verbose {
+            (self.instructions.len(), pc_i, self.cursor_index)
         } else {
-            let pseudo_length = self.instructions.last().unwrap().pseudo_index + 1;
-            let pseudo_cursor_index = self.instructions[self.cursor_index].pseudo_index;
-            let (pseudo_start, pseudo_end) = calc_range(pseudo_length, pseudo_cursor_index, pane.height);
-
-            // translate pseudo index values back into real index values
-            let start = if pseudo_start < 0 {
-                pseudo_start
-            } else {
-                let mut start =
-                    self.instructions.binary_search_by_key(&(pseudo_start as usize), |elt| elt.pseudo_index).unwrap();
-                while start > 0 && self.instructions[start - 1].pseudo_index == pseudo_start as usize {
-                    start -= 1;
-                }
-                start as i64
-            };
-            let end = if pseudo_end >= pseudo_length as i64 {
-                self.instructions.len() as i64
-            } else {
-                let mut end =
-                    self.instructions.binary_search_by_key(&(pseudo_end as usize), |elt| elt.pseudo_index).unwrap();
-                while end < self.instructions.len() && self.instructions[end].pseudo_index == pseudo_end as usize {
-                    end += 1;
-                }
-                end as i64
-            };
-            (start, end)
+            (
+                self.instructions.last().unwrap().pseudo_index + 1,
+                effects.instruction.pseudo_index,
+                self.instructions[self.cursor_index].pseudo_index,
+            )
         };
-        let mut i = start;
-        while i < end {
+        let (start, end) = calc_range(length, cursor_index, pane.height);
+
+        for i in start..end {
             // handle out-of-range lines
-            if i < 0 || i >= self.instructions.len() as i64 {
+            if i < 0 {
                 writeln!(pane).unwrap();
-                i += 1;
                 continue;
+            } else if i >= length as i64 {
+                break;
             }
 
+            let index = if self.verbose { i as usize } else { self.pseudo_addresses[&(i as usize)] };
+
             // get the line as chars and pad it to required length
-            let inst = &self.instructions[i as usize];
+            let inst = &self.instructions[index];
             let addr = inst.address;
             let mut line: Vec<char> = fields_to_string(
                 if self.verbose { &inst.verbose_fields } else { &inst.pseudo_fields },
@@ -568,29 +554,15 @@ impl Tui {
 
             // draw the line in the correct color
             let line: String = line.iter().collect();
-            if self.verbose && i == pc_i as i64
-                || !self.verbose && self.instructions[i as usize].pseudo_index == self.instructions[pc_i].pseudo_index
-            {
+            if i as usize == pc_index {
                 pane.color = self.current_pc_color;
-            } else if self.verbose && i == self.cursor_index as i64
-                || !self.verbose
-                    && self.instructions[i as usize].pseudo_index == self.instructions[self.cursor_index].pseudo_index
-            {
+            } else if i as usize == cursor_index {
                 pane.color = self.cursor_color;
             } else {
                 pane.color = self.normal_color;
             }
             writeln!(pane, "{}", line).unwrap();
             pane.color = self.normal_color;
-
-            if !self.verbose {
-                while i as usize + 1 < self.instructions.len()
-                    && self.instructions[i as usize].pseudo_index == self.instructions[i as usize + 1].pseudo_index
-                {
-                    i += 1;
-                }
-            }
-            i += 1;
         }
 
         // draw the side-effects label

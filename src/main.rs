@@ -1280,6 +1280,8 @@ fn main() -> Result<(), String> {
     add_local_labels(&mut m, &instructions);
 
     // find pseudo-instructions that combine two or more real instructions
+    // pseudo_addresses: pseudo index => verbose index
+    let mut pseudo_addresses = HashMap::new();
     {
         let mut i = 0;
         let mut j = 0;
@@ -1295,6 +1297,7 @@ fn main() -> Result<(), String> {
                 inst.verbose_fields = inst.op.to_fields();
                 inst.pseudo_index = j;
             }
+            pseudo_addresses.insert(j, i);
             i += n;
             j += 1;
         }
@@ -1336,7 +1339,7 @@ fn main() -> Result<(), String> {
     if mode == "debug" {
         m.reset();
         m.set_most_recent_memory(&sequence, 0);
-        let mut tui = Tui::new(m, instructions, addresses, sequence)?;
+        let mut tui = Tui::new(m, instructions, addresses, pseudo_addresses, sequence)?;
         tui.main_loop()?;
         return Ok(());
     }
