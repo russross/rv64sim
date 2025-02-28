@@ -697,22 +697,22 @@ impl Op {
             }
             Op::Div { rd, rs1, rs2 } => {
                 let rs2_val = m.get(*rs2);
-                let val = if rs2_val == 0 { -1 } else { (m.get(*rs1) as i128 / rs2_val as i128) as i64 };
+                let val = if rs2_val == 0 { -1 } else { m.get(*rs1).wrapping_div(rs2_val) };
                 m.set(*rd, val);
             }
             Op::Divu { rd, rs1, rs2 } => {
                 let rs2_val = m.get(*rs2) as u64;
-                let val = if rs2_val == 0 { -1 } else { ((m.get(*rs1) as u64) / rs2_val) as i64 };
+                let val = if rs2_val == 0 { -1 } else { (m.get(*rs1) as u64).wrapping_div(rs2_val) as i64 };
                 m.set(*rd, val);
             }
             Op::Rem { rd, rs1, rs2 } => {
                 let rs2_val = m.get(*rs2);
-                let val = if rs2_val == 0 { m.get(*rs1) } else { (m.get(*rs1) as i128 % rs2_val as i128) as i64 };
+                let val = if rs2_val == 0 { m.get(*rs1) } else { m.get(*rs1).wrapping_rem(rs2_val) };
                 m.set(*rd, val);
             }
             Op::Remu { rd, rs1, rs2 } => {
                 let rs2_val = m.get(*rs2) as u64;
-                let val = if rs2_val == 0 { m.get(*rs1) } else { ((m.get(*rs1) as u64) % rs2_val) as i64 };
+                let val = if rs2_val == 0 { m.get(*rs1) } else { (m.get(*rs1) as u64).wrapping_rem(rs2_val) as i64 };
                 m.set(*rd, val);
             }
 
@@ -723,22 +723,23 @@ impl Op {
             }
             Op::Divw { rd, rs1, rs2 } => {
                 let rs2_val = m.get32(*rs2);
-                let val = if rs2_val == 0 { -1 } else { m.get32(*rs1) / rs2_val };
+                let val = if rs2_val == 0 { -1 } else { m.get32(*rs1).wrapping_div(rs2_val) };
                 m.set32(*rd, val);
             }
             Op::Divuw { rd, rs1, rs2 } => {
-                let rs2_val = m.get32(*rs2) as u64;
-                let val = if rs2_val == 0 { -1 } else { ((m.get32(*rs1) as u64) / rs2_val) as i32 };
+                let rs2_val = m.get32(*rs2) as u32;
+                let val = if rs2_val == 0 { -1 } else { (m.get32(*rs1) as u32).wrapping_div(rs2_val) as i32 };
                 m.set32(*rd, val);
             }
             Op::Remw { rd, rs1, rs2 } => {
                 let rs2_val = m.get32(*rs2);
-                let val = if rs2_val == 0 { m.get32(*rs1) } else { m.get32(*rs1) % rs2_val };
+                let val = if rs2_val == 0 { m.get32(*rs1) } else { m.get32(*rs1).wrapping_rem(rs2_val) };
                 m.set32(*rd, val);
             }
             Op::Remuw { rd, rs1, rs2 } => {
-                let rs2_val = m.get32(*rs2) as u64;
-                let val = if rs2_val == 0 { m.get32(*rs1) } else { ((m.get32(*rs1) as u64) % rs2_val) as i32 };
+                let rs2_val = m.get32(*rs2) as u32;
+                let val =
+                    if rs2_val == 0 { m.get32(*rs1) } else { (m.get32(*rs1) as u32).wrapping_rem(rs2_val) as i32 };
                 m.set32(*rd, val);
             }
         }
